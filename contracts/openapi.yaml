@@ -1,0 +1,1001 @@
+openapi: 3.1.0
+info:
+  title: conpass API
+  version: 0.1.0
+  description: >
+    Loyalty & membership platform API. Single source of truth (contract-first).
+    Backend is the authority for balances; wallet passes are display-only.
+    Each tag maps to one single-responsibility Lambda service under backend/services.
+  contact:
+    name: conpass engineering
+servers:
+  - url: https://api.conpass.cards
+    description: Production (frontend is served from https://conpass.cards)
+  - url: http://localhost:3000
+    description: Local (serverless offline)
+
+tags:
+  - name: health
+    description: Liveness. Service:health
+  - name: me
+    description: Current authenticated identity. Service:identity
+  - name: merchants
+    description: Merchant (tenant) onboarding & subscription. Service:merchants
+  - name: programs
+    description: Loyalty/membership program config. Service:programs
+  - name: enrollment
+    description: Public customer enrollment → issue card. Service:enrollment
+  - name: cards
+    description: Issued card instances & wallet links. Service:cards
+  - name: operations
+    description: In-store accrue / redeem / validate. Service:operations
+  - name: birthday
+    description: Birthday benefit automation. Service:birthday
+  - name: admin
+    description: Platform-admin (cross-tenant). Service:admin
+  - name: notifications
+    description: Push reminders (stubbed). Service:notifications
+
+security:
+  - supabaseJwt: []
+
+paths:
+  /health:
+    get:
+      tags: [health]
+      operationId: getHealth
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /me:
+    get:
+      tags: [me]
+      operationId: getMe
+      summary: Resolve the caller's identity, roles and tenant
+      responses:
+        "200":
+          description: Identity
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Identity" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /merchants:
+    post:
+      tags: [merchants]
+      operationId: onboardMerchant
+      summary: Onboard a merchant (B2B signup → tenant + subscription + owner)
+      description: Payment is recorded as manual proof for now (PaymentProvider stub).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MerchantOnboardRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MerchantOnboardResult" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /merchants/{merchantId}:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+    get:
+      tags: [merchants]
+      operationId: getMerchant
+      summary: Get a merchant profile + subscription
+      responses:
+        "200":
+          description: Merchant
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Merchant" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /merchants/{merchantId}/operation-users:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+    get:
+      tags: [merchants]
+      operationId: listOperationUsers
+      summary: List cashier/operation accounts (tier-limited)
+      responses:
+        "200":
+          description: Operation users
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/OperationUser" }
+    post:
+      tags: [merchants]
+      operationId: addOperationUser
+      summary: Add a cashier/operation account (enforces tier limit)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OperationUserCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperationUser" }
+        "402": { $ref: "#/components/responses/TierLimit" }
+
+  /programs:
+    get:
+      tags: [programs]
+      operationId: listPrograms
+      summary: List programs for the caller's merchant
+      parameters:
+        - $ref: "#/components/parameters/MerchantIdQuery"
+      responses:
+        "200":
+          description: Programs
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Program" }
+    post:
+      tags: [programs]
+      operationId: createProgram
+      summary: Create & publish a program (enforces tier program limit)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProgramCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Program" }
+        "402": { $ref: "#/components/responses/TierLimit" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /programs/{programId}:
+    parameters:
+      - $ref: "#/components/parameters/ProgramId"
+    get:
+      tags: [programs]
+      operationId: getProgram
+      summary: Get a program
+      responses:
+        "200":
+          description: Program
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Program" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [programs]
+      operationId: updateProgram
+      summary: Update program parameters / appearance / active state
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProgramUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Program" }
+
+  /programs/{programId}/enroll:
+    parameters:
+      - $ref: "#/components/parameters/ProgramId"
+    post:
+      tags: [enrollment]
+      operationId: enrollCustomer
+      summary: Public enrollment — issue a card for a customer
+      description: >
+        Critical B2C path: minimal/optional PII (data minimization). Returns the
+        card with wallet add-links. Idempotent on (programId, dedupe key).
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EnrollmentRequest" }
+      responses:
+        "201":
+          description: Card issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CardIssued" }
+        "200":
+          description: Idempotent replay — existing card
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CardIssued" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /cards/{cardId}:
+    parameters:
+      - $ref: "#/components/parameters/CardId"
+    get:
+      tags: [cards]
+      operationId: getCard
+      summary: Get a card (balance is backend-authoritative)
+      responses:
+        "200":
+          description: Card
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Card" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /cards/{cardId}/wallet-links:
+    parameters:
+      - $ref: "#/components/parameters/CardId"
+    get:
+      tags: [cards]
+      operationId: getWalletLinks
+      summary: Get (re)generated Add-to-Wallet links for a card
+      responses:
+        "200":
+          description: Wallet links
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WalletLinks" }
+
+  /operations/resolve:
+    post:
+      tags: [operations]
+      operationId: resolveScan
+      summary: Resolve a scanned opaque token to a card + current balance
+      description: Used by the cashier station after a QR scan or manual code entry.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScanResolveRequest" }
+      responses:
+        "200":
+          description: Resolved card
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CardResolution" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /operations/accrue:
+    post:
+      tags: [operations]
+      operationId: accrue
+      summary: Accrue stamps or points (idempotent, offline-replayable)
+      description: >
+        Backend-authoritative mutation. Requires an Idempotency-Key; safe to replay
+        after offline queueing. Enforces per-window fraud limits. Triggers async
+        wallet-object update.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccrueRequest" }
+      responses:
+        "200":
+          description: Accrued (new or idempotent replay)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperationResult" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /operations/redeem:
+    post:
+      tags: [operations]
+      operationId: redeem
+      summary: Redeem a reward (idempotent, server-validated)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RedeemRequest" }
+      responses:
+        "200":
+          description: Redeemed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperationResult" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /operations/validate-access:
+    post:
+      tags: [operations]
+      operationId: validateAccess
+      summary: Validate a membership pass access (gym/event)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ValidateAccessRequest" }
+      responses:
+        "200":
+          description: Access decision
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccessDecision" }
+
+  /programs/{programId}/redemptions:
+    parameters:
+      - $ref: "#/components/parameters/ProgramId"
+    get:
+      tags: [operations]
+      operationId: listRedemptions
+      summary: Redemption report for a program
+      parameters:
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+      responses:
+        "200":
+          description: Redemptions
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Redemption" }
+
+  /programs/{programId}/metrics:
+    parameters:
+      - $ref: "#/components/parameters/ProgramId"
+    get:
+      tags: [programs]
+      operationId: getProgramMetrics
+      summary: Key metrics for a program (installs, second-visit, churn, redemptions)
+      responses:
+        "200":
+          description: Metrics
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProgramMetrics" }
+
+  /programs/{programId}/birthday-automation:
+    parameters:
+      - $ref: "#/components/parameters/ProgramId"
+    put:
+      tags: [birthday]
+      operationId: setBirthdayAutomation
+      summary: Configure automatic birthday benefit issuance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BirthdayAutomation" }
+      responses:
+        "200":
+          description: Saved
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BirthdayAutomation" }
+
+  /birthday-cards:
+    post:
+      tags: [birthday]
+      operationId: issueBirthdayCard
+      summary: Issue a unique birthday benefit card for a customer
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BirthdayCardCreate" }
+      responses:
+        "201":
+          description: Issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BirthdayCard" }
+
+  /admin/clients:
+    get:
+      tags: [admin]
+      operationId: listClients
+      summary: Platform-admin — list all B2B clients with payment status
+      responses:
+        "200":
+          description: Clients
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AdminClient" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/clients/{merchantId}/subscription:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+    patch:
+      tags: [admin]
+      operationId: updateSubscription
+      summary: Platform-admin — change plan / mark paid / suspend
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SubscriptionUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Subscription" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/stats:
+    get:
+      tags: [admin]
+      operationId: getPlatformStats
+      summary: Platform-admin — MRR, active clients, overdue
+      responses:
+        "200":
+          description: Stats
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformStats" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /notifications/reminders:
+    post:
+      tags: [notifications]
+      operationId: sendReminder
+      summary: Send a push reminder to eligible customers (stubbed provider)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReminderRequest" }
+      responses:
+        "202":
+          description: Accepted (queued)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReminderResult" }
+
+components:
+  securitySchemes:
+    supabaseJwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Supabase Auth (GoTrue) access token, validated via JWKS.
+
+  parameters:
+    MerchantId:
+      name: merchantId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    MerchantIdQuery:
+      name: merchantId
+      in: query
+      required: false
+      schema: { type: string, format: uuid }
+    ProgramId:
+      name: programId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    CardId:
+      name: cardId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Client-generated UUID; makes the mutation safe to replay after offline queueing.
+      schema: { type: string, format: uuid }
+
+  responses:
+    Unauthorized:
+      description: Missing/invalid token
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Authenticated but not allowed
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Conflict (e.g. duplicate or state conflict)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ValidationError:
+      description: Request failed validation
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TierLimit:
+      description: Subscription tier limit reached
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: Per-window fraud/rate limit hit
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, description: Stable machine-readable error code }
+        message: { type: string }
+        details:
+          type: object
+          additionalProperties: true
+      additionalProperties: false
+
+    HealthStatus:
+      type: object
+      required: [status, service, version]
+      properties:
+        status: { type: string, enum: [ok] }
+        service: { type: string }
+        version: { type: string }
+
+    Tier:
+      type: string
+      enum: [starter, growth, pro, enterprise]
+
+    ProgramType:
+      type: string
+      enum: [loyalty_stamps, loyalty_points, membership_pass]
+
+    RewardMechanic:
+      type: string
+      enum: [stamps, points]
+
+    MembershipValidity:
+      type: string
+      enum: [monthly, quarterly, annual, per_event]
+
+    PaymentStatus:
+      type: string
+      enum: [pending, paid, overdue, suspended]
+
+    Role:
+      type: string
+      enum: [platform_admin, merchant_owner, operation_user, customer]
+
+    Identity:
+      type: object
+      required: [userId, roles]
+      properties:
+        userId: { type: string, format: uuid }
+        email: { type: string, format: email }
+        roles:
+          type: array
+          items: { $ref: "#/components/schemas/Role" }
+        merchantId:
+          type: string
+          format: uuid
+          description: Present for merchant_owner / operation_user.
+        station: { type: string, description: Operation-user station label (e.g. Caja 1). }
+      additionalProperties: false
+
+    MerchantOnboardRequest:
+      type: object
+      required: [businessName, ruc, category, city, contactName, contactEmail, tier, payment]
+      properties:
+        businessName: { type: string }
+        ruc: { type: string, description: Ecuador tax id }
+        category: { type: string, enum: [cafe_restaurant, gym, retail, events, other] }
+        city: { type: string }
+        contactName: { type: string }
+        contactEmail: { type: string, format: email }
+        tier: { $ref: "#/components/schemas/Tier" }
+        payment: { $ref: "#/components/schemas/PaymentSubmission" }
+      additionalProperties: false
+
+    PaymentSubmission:
+      description: Stubbed payment. For now only manual proof is stored.
+      type: object
+      required: [method]
+      properties:
+        method: { type: string, enum: [card, deuna, manual_transfer] }
+        proofStorageKey:
+          type: string
+          description: Supabase Storage key of the uploaded proof (manual_transfer).
+      additionalProperties: false
+
+    MerchantOnboardResult:
+      type: object
+      required: [merchant, subscription, ownerInviteSent]
+      properties:
+        merchant: { $ref: "#/components/schemas/Merchant" }
+        subscription: { $ref: "#/components/schemas/Subscription" }
+        ownerInviteSent: { type: boolean }
+      additionalProperties: false
+
+    Merchant:
+      type: object
+      required: [id, businessName, city, category, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        businessName: { type: string }
+        ruc: { type: string }
+        category: { type: string }
+        city: { type: string }
+        contactName: { type: string }
+        contactEmail: { type: string, format: email }
+        logoStorageKey: { type: string }
+        subscription: { $ref: "#/components/schemas/Subscription" }
+        createdAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    Subscription:
+      type: object
+      required: [tier, paymentStatus, mrrUsd]
+      properties:
+        tier: { $ref: "#/components/schemas/Tier" }
+        paymentStatus: { $ref: "#/components/schemas/PaymentStatus" }
+        mrrUsd: { type: number }
+        activePassLimit: { type: integer, description: Tier cap on active installed passes. }
+        activePassCount: { type: integer, description: Billing metric — installed & not deleted. }
+        programLimit: { type: integer }
+        operationUserLimit: { type: integer }
+        nextChargeAt: { type: string, format: date }
+        lastPaymentAt: { type: string, format: date }
+      additionalProperties: false
+
+    SubscriptionUpdate:
+      type: object
+      properties:
+        tier: { $ref: "#/components/schemas/Tier" }
+        paymentStatus: { $ref: "#/components/schemas/PaymentStatus" }
+      additionalProperties: false
+
+    OperationUser:
+      type: object
+      required: [id, name, email, station]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string, format: email }
+        station: { type: string, enum: [caja_1, caja_2, door_access] }
+      additionalProperties: false
+
+    OperationUserCreate:
+      type: object
+      required: [name, email, station]
+      properties:
+        name: { type: string }
+        email: { type: string, format: email }
+        station: { type: string, enum: [caja_1, caja_2, door_access] }
+      additionalProperties: false
+
+    ProgramAppearance:
+      type: object
+      properties:
+        color: { type: string, description: Hex accent color. }
+        iconStorageKey: { type: string, description: 512x512 PNG. }
+        backgroundStorageKey: { type: string, description: 1032x336 JPG. }
+      additionalProperties: false
+
+    ProgramCreate:
+      type: object
+      required: [type, name, appearance, wallets]
+      properties:
+        type: { $ref: "#/components/schemas/ProgramType" }
+        name: { type: string }
+        mechanic: { $ref: "#/components/schemas/RewardMechanic" }
+        stampsForReward: { type: integer, minimum: 1 }
+        pointsForReward: { type: integer, minimum: 1 }
+        pointsPerDollar: { type: number, minimum: 0 }
+        reward: { type: string, description: Reward description shown on the card. }
+        membershipValidity: { $ref: "#/components/schemas/MembershipValidity" }
+        membershipIncludes: { type: string }
+        welcomeBonus: { type: integer, default: 0 }
+        expiryDays: { type: integer, description: Balance expiry window; null = no expiry. }
+        appearance: { $ref: "#/components/schemas/ProgramAppearance" }
+        wallets:
+          type: array
+          items: { type: string, enum: [apple, google] }
+          minItems: 1
+      additionalProperties: false
+
+    ProgramUpdate:
+      type: object
+      properties:
+        name: { type: string }
+        reward: { type: string }
+        stampsForReward: { type: integer, minimum: 1 }
+        pointsForReward: { type: integer, minimum: 1 }
+        pointsPerDollar: { type: number, minimum: 0 }
+        appearance: { $ref: "#/components/schemas/ProgramAppearance" }
+        active: { type: boolean }
+      additionalProperties: false
+
+    Program:
+      allOf:
+        - $ref: "#/components/schemas/ProgramCreate"
+        - type: object
+          required: [id, merchantId, active, createdAt]
+          properties:
+            id: { type: string, format: uuid }
+            merchantId: { type: string, format: uuid }
+            active: { type: boolean }
+            enrollmentUrl: { type: string, format: uri }
+            createdAt: { type: string, format: date-time }
+
+    EnrollmentRequest:
+      description: Minimal PII by design; all personal fields optional.
+      type: object
+      properties:
+        fullName: { type: string }
+        email: { type: string, format: email }
+        phone: { type: string, description: WhatsApp number. }
+        birthday: { type: string, format: date }
+        accessCode: { type: string, description: Required for exclusive/membership programs. }
+        consent: { type: boolean, description: Consent to WhatsApp/email comms. }
+        dedupeKey:
+          type: string
+          description: Optional client key to dedupe repeat submissions from the same device.
+      additionalProperties: false
+
+    Card:
+      type: object
+      required: [id, programId, merchantId, type, balance, active, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        programId: { type: string, format: uuid }
+        merchantId: { type: string, format: uuid }
+        customerId: { type: string, format: uuid }
+        type: { $ref: "#/components/schemas/ProgramType" }
+        opaqueToken: { type: string, description: Opaque per-member id encoded in the QR. }
+        balance: { $ref: "#/components/schemas/Balance" }
+        holderName: { type: string, description: Display name (e.g. "María T."). }
+        active: { type: boolean }
+        walletInstalled: { type: boolean, description: Drives the active-pass billing metric. }
+        createdAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    Balance:
+      description: Backend-authoritative. Wallet is display-only.
+      type: object
+      required: [mechanic]
+      properties:
+        mechanic: { $ref: "#/components/schemas/RewardMechanic" }
+        stamps: { type: integer, minimum: 0 }
+        stampsForReward: { type: integer }
+        points: { type: integer, minimum: 0 }
+        pointsForReward: { type: integer }
+        rewardsAvailable: { type: integer, minimum: 0 }
+        membershipActiveUntil: { type: string, format: date }
+      additionalProperties: false
+
+    WalletLinks:
+      type: object
+      properties:
+        google: { type: string, format: uri, description: Add to Google Wallet (signed JWT save link). }
+        apple: { type: string, format: uri, description: Add to Apple Wallet (.pkpass) — future. }
+      additionalProperties: false
+
+    CardIssued:
+      type: object
+      required: [card, walletLinks]
+      properties:
+        card: { $ref: "#/components/schemas/Card" }
+        walletLinks: { $ref: "#/components/schemas/WalletLinks" }
+      additionalProperties: false
+
+    ScanResolveRequest:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string, description: Scanned opaque token or manually-entered code. }
+      additionalProperties: false
+
+    CardResolution:
+      type: object
+      required: [card, program]
+      properties:
+        card: { $ref: "#/components/schemas/Card" }
+        program: { $ref: "#/components/schemas/Program" }
+      additionalProperties: false
+
+    AccrueRequest:
+      type: object
+      required: [cardId, operationUserId]
+      properties:
+        cardId: { type: string, format: uuid }
+        operationUserId: { type: string, format: uuid }
+        stamps: { type: integer, minimum: 1, description: Stamps to add (stamps mechanic). }
+        amount: { type: number, minimum: 0, description: Purchase amount → points (points mechanic). }
+        occurredAt:
+          type: string
+          format: date-time
+          description: Client timestamp of the in-store event (for offline replay ordering).
+      additionalProperties: false
+
+    RedeemRequest:
+      type: object
+      required: [cardId, operationUserId]
+      properties:
+        cardId: { type: string, format: uuid }
+        operationUserId: { type: string, format: uuid }
+        occurredAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    ValidateAccessRequest:
+      type: object
+      required: [cardId, operationUserId]
+      properties:
+        cardId: { type: string, format: uuid }
+        operationUserId: { type: string, format: uuid }
+        occurredAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    OperationResult:
+      type: object
+      required: [card, transaction]
+      properties:
+        card: { $ref: "#/components/schemas/Card" }
+        transaction: { $ref: "#/components/schemas/Transaction" }
+        walletUpdateQueued: { type: boolean }
+      additionalProperties: false
+
+    Transaction:
+      type: object
+      required: [id, cardId, kind, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        cardId: { type: string, format: uuid }
+        kind: { type: string, enum: [accrue_stamps, accrue_points, redeem, validate_access, birthday_issue] }
+        stampsDelta: { type: integer }
+        pointsDelta: { type: integer }
+        operationUserId: { type: string, format: uuid }
+        idempotencyKey: { type: string, format: uuid }
+        createdAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    AccessDecision:
+      type: object
+      required: [cardId, granted]
+      properties:
+        cardId: { type: string, format: uuid }
+        granted: { type: boolean }
+        reason: { type: string }
+        validUntil: { type: string, format: date }
+      additionalProperties: false
+
+    Redemption:
+      type: object
+      required: [id, customerName, programId, reward, redeemedAt]
+      properties:
+        id: { type: string, format: uuid }
+        customerName: { type: string }
+        customerPhone: { type: string }
+        customerEmail: { type: string, format: email }
+        programId: { type: string, format: uuid }
+        program: { type: string }
+        reward: { type: string }
+        redeemedAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    ProgramMetrics:
+      type: object
+      properties:
+        secondVisitRate30d: { type: number, description: "% of new customers returning within 30d." }
+        activeInstalledPasses: { type: integer }
+        installsThisWeek: { type: integer }
+        visits: { type: integer }
+        redemptions: { type: integer }
+        churnRate: { type: number, description: "% passes deleted." }
+        eligibleForReminder: { type: integer, description: Customers 1 stamp/step from reward. }
+      additionalProperties: false
+
+    BirthdayAutomation:
+      type: object
+      required: [enabled, benefitType]
+      properties:
+        enabled: { type: boolean }
+        benefitType: { type: string, enum: [discount, gift] }
+        discountPercent: { type: integer, minimum: 1, maximum: 100 }
+        gift: { type: string }
+        validityDays: { type: integer, minimum: 1 }
+      additionalProperties: false
+
+    BirthdayCardCreate:
+      type: object
+      required: [programId, customerId]
+      properties:
+        programId: { type: string, format: uuid }
+        customerId: { type: string, format: uuid }
+      additionalProperties: false
+
+    BirthdayCard:
+      type: object
+      required: [id, code, customerName, status]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string, description: Unique irreproducible code (e.g. CUMPLE-3F9A). }
+        customerName: { type: string }
+        benefit: { type: string }
+        validUntil: { type: string, format: date }
+        status: { type: string, enum: [pending, issued, redeemed, expired] }
+        walletLinks: { $ref: "#/components/schemas/WalletLinks" }
+      additionalProperties: false
+
+    AdminClient:
+      type: object
+      required: [merchantId, name, city, tier, paymentStatus, mrrUsd]
+      properties:
+        merchantId: { type: string, format: uuid }
+        name: { type: string }
+        city: { type: string }
+        tier: { $ref: "#/components/schemas/Tier" }
+        paymentStatus: { $ref: "#/components/schemas/PaymentStatus" }
+        mrrUsd: { type: number }
+        since: { type: string, format: date }
+        nextChargeAt: { type: string, format: date }
+        lastPaymentAt: { type: string, format: date }
+      additionalProperties: false
+
+    PlatformStats:
+      type: object
+      required: [activeClients, mrrUsd]
+      properties:
+        activeClients: { type: integer }
+        mrrUsd: { type: number }
+        growthCount: { type: integer }
+        starterCount: { type: integer }
+        overdueCount: { type: integer }
+      additionalProperties: false
+
+    ReminderRequest:
+      type: object
+      required: [programId]
+      properties:
+        programId: { type: string, format: uuid }
+        segment: { type: string, enum: [one_step_from_reward, inactive_30d, birthday], default: one_step_from_reward }
+        channel: { type: string, enum: [push, whatsapp], default: push }
+      additionalProperties: false
+
+    ReminderResult:
+      type: object
+      required: [queued]
+      properties:
+        queued: { type: integer, description: Recipients queued. }
+        provider: { type: string, description: "For now: 'stub'." }
+      additionalProperties: false

@@ -1,0 +1,11 @@
+# Base runtime deps shared by (almost) every feature Lambda — packaged into the
+# `common` Lambda layer. Kept intentionally small for lean cold starts.
+# Wallet vendor SDKs (google-auth, etc.) are NOT here — they are added only to the
+# functions that issue/update passes (Phase 4) so other Lambdas don't pay for them.
+fastapi==0.111.0
+mangum==0.17.0
+pydantic==2.13.4           # aligned with supabase 2.31's requirement (2.7.x conflicts)
+PyJWT[crypto]==2.13.0      # [crypto] pulls `cryptography` for ES256/RS256 JWKS verify
+PyYAML==6.0.1
+email-validator==2.1.1     # required by generated EmailStr fields
+supabase==2.31.0           # 2.5.x rejects the new sb_ key format; 2.31 accepts it

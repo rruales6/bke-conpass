@@ -1,0 +1,17 @@
+{
+  "name": "conpass-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "conpass backend — Serverless Framework deploy tooling",
+  "scripts": {
+    "package": ".venv/bin/python scripts/with_env.py npx serverless package --stage prod",
+    "deploy": ".venv/bin/python scripts/with_env.py npx serverless deploy --stage prod",
+    "offline": ".venv/bin/python scripts/with_env.py npx serverless offline --stage local",
+    "remove": "npx serverless remove --stage prod"
+  },
+  "devDependencies": {
+    "serverless": "^3.39.0",
+    "serverless-python-requirements": "^6.1.1",
+    "serverless-offline": "^13.6.0"
+  }
+}

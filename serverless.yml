@@ -1,0 +1,190 @@
+service: conpass-api
+frameworkVersion: "3"
+
+# One isolated, single-responsibility Lambda per feature (D2). All share the `common`
+# code layer + an auto-built dependency layer, so each function stays tiny.
+#
+# Auth: Supabase now issues asymmetric (ES256/RS256) JWTs and does not expose OIDC
+# discovery at /auth/v1, so the API Gateway `jwt` authorizer is a poor fit. Instead each
+# Lambda verifies the token in-app against the Supabase JWKS URL (conpass_common.auth,
+# cached). Public routes (health, enroll, onboard) simply don't require a token.
+# TODO(perf): add a single Lambda REQUEST authorizer reusing conpass_common.auth to
+# reject unauthenticated calls at the edge and save warm invocations.
+
+plugins:
+  - serverless-python-requirements
+
+provider:
+  name: aws
+  runtime: python3.12
+  architecture: arm64            # Graviton — cheaper + faster (D2)
+  region: us-east-1              # pinned: matches Supabase; ACM for CloudFront must be here
+  stage: ${opt:stage, "dev"}
+  memorySize: 256
+  timeout: 15
+  logRetentionInDays: 14
+  environment:
+    CONPASS_STAGE: ${self:provider.stage}
+    CONPASS_CORS_ORIGINS: ${env:CONPASS_CORS_ORIGINS, "https://conpass.cards"}
+    SUPABASE_URL: ${env:SUPABASE_URL, ""}
+    SUPABASE_SECRET_KEY: ${env:SUPABASE_SECRET_KEY, ""}       # backend only (service_role)
+    SUPABASE_PUBLISHABLE_KEY: ${env:SUPABASE_PUBLISHABLE_KEY, ""}
+    SUPABASE_JWKS_URL: ${env:SUPABASE_JWKS_URL, ""}
+    GOOGLE_WALLET_ISSUER_ID: ${env:GOOGLE_WALLET_ISSUER_ID, ""}
+    GOOGLE_WALLET_SA_JSON: ${env:GOOGLE_WALLET_SA_JSON, ""}
+  httpApi:
+    cors: true
+
+custom:
+  pythonRequirements:
+    layer: true                  # build deps into their own layer (shared across fns)
+    # slim strips *.dist-info, which breaks importlib.metadata (email-validator, pulled by
+    # pydantic EmailStr, reads its own version at import). Phase 7: re-enable with
+    # slimPatternsAppendDefaults:false + patterns limited to *.pyc/__pycache__.
+    slim: false
+    dockerizePip: true           # build manylinux aarch64 wheels (needs Docker running)
+    useDownloadCache: true
+    useStaticCache: true
+    fileName: layers/common/requirements.txt
+  # Anchor for shared function config (kept under custom: so serverless doesn't warn
+  # about an unrecognized root property). Merged into each function via `<<: *fnDefaults`.
+  fnDefaults: &fnDefaults
+    layers:
+      - { Ref: CommonLambdaLayer }             # conpass_common (this repo's shared code)
+      - { Ref: PythonRequirementsLambdaLayer } # fastapi/pydantic/supabase/… deps
+    # snapStart: true            # enable after validating Python SnapStart on the stage
+
+package:
+  individually: true             # per-function zips = smaller, faster cold starts
+  # No global patterns: a global "!**" also nukes the `common` layer's own files.
+  # Each function self-excludes below; conpass_common ships in the layer (/opt/python).
+
+layers:
+  common:
+    path: layers/common
+    name: conpass-common-${self:provider.stage}
+    description: Shared conpass code (conpass_common package)
+    compatibleRuntimes:
+      - python3.12
+
+functions:
+  health:
+    <<: *fnDefaults
+    handler: services/health/handler.handler
+    package: { patterns: ["!**", "services/health/**"] }
+    events:
+      - httpApi: { method: GET, path: /health }
+
+  identity:
+    <<: *fnDefaults
+    handler: services/identity/handler.handler
+    package: { patterns: ["!**", "services/identity/**"] }
+    events:
+      - httpApi: { method: GET, path: /me }
+
+  merchants:
+    <<: *fnDefaults
+    handler: services/merchants/handler.handler
+    package: { patterns: ["!**", "services/merchants/**"] }
+    events:
+      - httpApi:
+          method: POST
+          path: /merchants
+      - httpApi:
+          method: GET
+          path: /merchants/{merchantId}
+      - httpApi:
+          method: GET
+          path: /merchants/{merchantId}/operation-users
+      - httpApi:
+          method: POST
+          path: /merchants/{merchantId}/operation-users
+
+  programs:
+    <<: *fnDefaults
+    handler: services/programs/handler.handler
+    package: { patterns: ["!**", "services/programs/**"] }
+    events:
+      - httpApi:
+          method: GET
+          path: /programs
+      - httpApi:
+          method: POST
+          path: /programs
+      - httpApi:
+          method: GET
+          path: /programs/{programId}
+      - httpApi:
+          method: PATCH
+          path: /programs/{programId}
+      - httpApi:
+          method: GET
+          path: /programs/{programId}/metrics
+
+  enrollment:
+    <<: *fnDefaults
+    handler: services/enrollment/handler.handler
+    package: { patterns: ["!**", "services/enrollment/**"] }
+    events:
+      - httpApi:              # public B2C path
+          method: POST
+          path: /programs/{programId}/enroll
+
+  cards:
+    <<: *fnDefaults
+    handler: services/cards/handler.handler
+    package: { patterns: ["!**", "services/cards/**"] }
+    events:
+      - httpApi:
+          method: GET
+          path: /cards/{cardId}
+      - httpApi:
+          method: GET
+          path: /cards/{cardId}/wallet-links
+
+  operations:
+    <<: *fnDefaults
+    handler: services/operations/handler.handler
+    package: { patterns: ["!**", "services/operations/**"] }
+    events:
+      - httpApi: { method: POST, path: /operations/resolve }
+      - httpApi: { method: POST, path: /operations/accrue }
+      - httpApi: { method: POST, path: /operations/redeem }
+      - httpApi: { method: POST, path: /operations/validate-access }
+      - httpApi:
+          method: GET
+          path: /programs/{programId}/redemptions
+
+  birthday:
+    <<: *fnDefaults
+    handler: services/birthday/handler.handler
+    package: { patterns: ["!**", "services/birthday/**"] }
+    events:
+      - httpApi:
+          method: PUT
+          path: /programs/{programId}/birthday-automation
+      - httpApi:
+          method: POST
+          path: /birthday-cards
+
+  admin:
+    <<: *fnDefaults
+    handler: services/admin/handler.handler
+    package: { patterns: ["!**", "services/admin/**"] }
+    events:
+      - httpApi:
+          method: GET
+          path: /admin/clients
+      - httpApi:
+          method: PATCH
+          path: /admin/clients/{merchantId}/subscription
+      - httpApi:
+          method: GET
+          path: /admin/stats
+
+  notifications:
+    <<: *fnDefaults
+    handler: services/notifications/handler.handler
+    package: { patterns: ["!**", "services/notifications/**"] }
+    events:
+      - httpApi: { method: POST, path: /notifications/reminders }

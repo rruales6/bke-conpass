@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+
+# Node / Serverless
+node_modules/
+.serverless/
+.requirements/
+package-lock.json
+
+# Env & secrets — NEVER commit
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*-key.json
+service-account*.json
+conpass-key.json
+
+# OS
+.DS_Store

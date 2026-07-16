@@ -1,0 +1,13 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["layers/common/python/conpass_common/models.py"]  # generated
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["B008"]  # FastAPI uses callables in defaults (Depends/Header)
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["layers/common/python", "."]
+addopts = "-q"
