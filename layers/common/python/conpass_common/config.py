@@ -105,8 +105,14 @@ class Settings:
         raw = os.environ.get("CONPASS_CORS_ORIGINS")
         if raw:
             return [o.strip() for o in raw.split(",") if o.strip()]
-        # Production frontend is https://conpass.cards; allow local dev too.
-        return ["https://conpass.cards", "http://localhost:5173", "http://localhost:3000"]
+        # Production frontend is https://conpass.cards; allow local dev + the CloudFront
+        # test distribution too. (Remove the cloudfront.net entry once conpass.cards is live.)
+        return [
+            "https://conpass.cards",
+            "https://d2gwyvyec58l70.cloudfront.net",  # test site (S3+CloudFront)
+            "http://localhost:5173",
+            "http://localhost:3000",
+        ]
 
     @property
     def stage(self) -> str:

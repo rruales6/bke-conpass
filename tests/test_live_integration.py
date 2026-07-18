@@ -7,6 +7,7 @@ accrue → redeem, verifying backend-authoritative balances, then deletes the me
 """
 from __future__ import annotations
 
+import contextlib
 import uuid
 
 import pytest
@@ -30,17 +31,19 @@ def test_full_loop():
     c = service_client()
     merchant_id = None
     try:
-        # 1) Onboard merchant (public)
+        # 1) Onboard merchant (public). Unique email so a prior failed run can't 409.
         from services.merchants.handler import app as merchants_app
+        owner_email = f"it-{uuid.uuid4().hex[:8]}@conpasstest.io"
         r = TestClient(merchants_app).post("/merchants", json={
             "businessName": "__conpass_it", "ruc": "0999999999001",
             "category": "cafe_restaurant", "city": "Quito",
-            "contactName": "IT", "contactEmail": "it@test.co",
+            "contactName": "IT", "contactEmail": owner_email,
             "tier": "growth", "payment": {"method": "manual_transfer"},
         })
         assert r.status_code == 201, r.text
         merchant_id = r.json()["merchant"]["id"]
         assert r.json()["subscription"]["programLimit"] == 3  # growth tier default
+        assert r.json()["ownerInviteSent"] and r.json()["ownerTempPassword"]  # Phase 2
 
         owner = _owner(merchant_id)
 
@@ -117,4 +120,12 @@ def test_full_loop():
         ops_h.app.dependency_overrides.clear()
     finally:
         if merchant_id:
+            # Onboarding provisions a Supabase Auth owner (no FK to auth.users), so grab
+            # the profile user_ids before the merchant cascade removes the profiles.
+            uids = [p["user_id"] for p in c.table("profiles").select("user_id")
+                    .eq("merchant_id", merchant_id).execute().data]
             c.table("merchants").delete().eq("id", merchant_id).execute()
+            for uid in uids:
+                # some profiles (e.g. the seeded operator) aren't real auth users
+                with contextlib.suppress(Exception):
+                    c.auth.admin.delete_user(uid)

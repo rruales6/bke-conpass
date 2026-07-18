@@ -645,6 +645,12 @@ components:
         merchant: { $ref: "#/components/schemas/Merchant" }
         subscription: { $ref: "#/components/schemas/Subscription" }
         ownerInviteSent: { type: boolean }
+        ownerEmail: { type: string, format: email, description: Login email for the owner account. }
+        ownerTempPassword:
+          type: string
+          description: >
+            Temporary password for first login (shown once on the activation screen,
+            per Función 03). The owner should change it after logging in.
       additionalProperties: false
 
     Merchant:
@@ -693,6 +699,9 @@ components:
         name: { type: string }
         email: { type: string, format: email }
         station: { type: string, enum: [caja_1, caja_2, door_access] }
+        tempPassword:
+          type: string
+          description: Temporary password, returned only when the operator is first created.
       additionalProperties: false
 
     OperationUserCreate:

@@ -26,3 +26,5 @@ conpass-key.json
 
 # OS
 .DS_Store
+
+.claude/

@@ -1,19 +1,21 @@
 """merchants service — B2B onboarding & subscription (Función 02).
 
-Onboarding creates the tenant (merchant + subscription with tier-defaulted limits) and
-records payment through the PaymentProvider stub (D9). The owner's login is provisioned
-by the Supabase Auth invite in Phase 2; ownerInviteSent reflects that.
+Onboarding creates the tenant (merchant + subscription with tier-defaulted limits),
+records payment through the PaymentProvider stub (D9), and provisions the owner's
+Supabase Auth login (merchant_owner role in app_metadata) — returning a temp password
+for first login (Función 03). Operators are provisioned the same way, tier-limited.
 """
 from __future__ import annotations
 
 from conpass_common import CurrentIdentity, create_app, lambda_handler
-from conpass_common.errors import NotFound, NotImplementedYet, TierLimit
+from conpass_common.errors import AppError, NotFound, TierLimit
 from conpass_common.models import (
     MerchantOnboardRequest,
     OperationUserCreate,
 )
 from conpass_common.providers import get_payment_provider
 from conpass_common.providers.payment import PaymentIntent
+from conpass_common.provisioning import provision_user
 
 from .repository import MerchantsRepository
 
@@ -69,11 +71,22 @@ def onboard_merchant(body: MerchantOnboardRequest):
         proof_storage_key=body.payment.proofStorageKey,
     ))
 
+    # Provision the owner's login (Supabase Auth user with merchant_owner role).
+    # Roll back the tenant if provisioning fails (e.g. email already in use).
+    try:
+        owner = provision_user(
+            email=str(body.contactEmail), roles=["merchant_owner"],
+            merchant_id=merchant["id"], name=body.contactName)
+    except AppError:
+        repo.delete_merchant(merchant["id"])
+        raise
+
     return {
         "merchant": _merchant_model(merchant, sub),
         "subscription": _subscription_model(sub),
-        # Supabase Auth invite is wired in Phase 2:
-        "ownerInviteSent": False,
+        "ownerInviteSent": True,
+        "ownerEmail": owner.email,
+        "ownerTempPassword": owner.temp_password,
     }
 
 
@@ -104,8 +117,14 @@ def add_operation_user(merchant_id: str, body: OperationUserCreate, identity: Cu
     limit = sub.get("operation_user_limit") if sub else None
     if limit is not None and repo.count_operation_users(merchant_id) >= limit:
         raise TierLimit(f"operation-user limit ({limit}) reached for this tier")
-    # Creating the login requires a Supabase Auth invite (Phase 2).
-    raise NotImplementedYet("Phase 2 — Supabase Auth invite for the operation user")
+
+    op = provision_user(
+        email=str(body.email), roles=["operation_user"],
+        merchant_id=merchant_id, station=body.station.value, name=body.name)
+    return {
+        "id": op.user_id, "name": body.name, "email": op.email,
+        "station": body.station.value, "tempPassword": op.temp_password,
+    }
 
 
 handler = lambda_handler(app)
