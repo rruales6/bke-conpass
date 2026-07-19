@@ -72,3 +72,30 @@ class WalletProvider(ABC):
     @abstractmethod
     def add_link(self, content: PassContent) -> str:
         """Return (or regenerate) the add-to-wallet link without mutating state."""
+
+
+def build_pass_content(card: dict, program: dict, merchant: dict | None) -> PassContent:
+    """Map canonical DB rows (cards/programs/merchants) → a vendor-neutral PassContent.
+
+    Shared by enrollment, cards and operations so the row→pass mapping lives in one
+    place. Balances come from the CARD (backend-authoritative); labels/appearance from
+    the PROGRAM; the issuer/holder name from the MERCHANT.
+    """
+    mu = card.get("membership_active_until")
+    return PassContent(
+        card_id=str(card["id"]),
+        program_id=str(program["id"]),
+        merchant_id=str(card["merchant_id"]),
+        program_type=program["type"],
+        program_name=program["name"],
+        merchant_name=(merchant or {}).get("business_name") or "",
+        holder_name=card.get("holder_name"),
+        opaque_token=card["opaque_token"],
+        stamps=card.get("stamps") or 0,
+        stamps_for_reward=program.get("stamps_for_reward"),
+        points=card.get("points") or 0,
+        points_for_reward=program.get("points_for_reward"),
+        reward_text=program.get("reward"),
+        membership_active_until=mu.isoformat() if hasattr(mu, "isoformat") else mu,
+        accent_color=program.get("color"),
+    )

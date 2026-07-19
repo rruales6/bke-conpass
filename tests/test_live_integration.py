@@ -30,6 +30,8 @@ def _owner(merchant_id: str) -> Identity:
 def test_full_loop():
     c = service_client()
     merchant_id = None
+    card_id = None
+    wallet_on = bool(settings.google_wallet_issuer_id and settings.google_wallet_sa_content)
     try:
         # 1) Onboard merchant (public). Unique email so a prior failed run can't 409.
         from services.merchants.handler import app as merchants_app
@@ -73,6 +75,10 @@ def test_full_loop():
         card_id = card["id"]
         assert card["balance"]["stamps"] == 1          # welcome bonus
         assert card["holderName"] == "María T."
+        if wallet_on:  # Phase 4: enroll issued a real Google Wallet object + save link
+            link = r.json()["walletLinks"].get("google")
+            assert link and link.startswith("https://pay.google.com/gp/v/save/"), \
+                r.json()["walletLinks"]
 
         # 3b) Re-enroll same device → same card, 200 (dedupe)
         r2 = TestClient(enroll_h.app).post(
@@ -119,6 +125,12 @@ def test_full_loop():
         assert red.json()["card"]["balance"]["rewardsAvailable"] == 0
         ops_h.app.dependency_overrides.clear()
     finally:
+        # Deactivate the Google Wallet object we created (passes can't be deleted).
+        if wallet_on and card_id:
+            with contextlib.suppress(Exception):
+                from conpass_common.providers import get_wallet_provider
+                oid = f"{settings.google_wallet_issuer_id}.card_{card_id}"
+                get_wallet_provider().revoke(oid)
         if merchant_id:
             # Onboarding provisions a Supabase Auth owner (no FK to auth.users), so grab
             # the profile user_ids before the merchant cascade removes the profiles.

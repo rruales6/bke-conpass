@@ -1,11 +1,13 @@
 """operations service — in-store accrue / redeem / validate / resolve.
 
 Single-responsibility Lambda. Mutations are idempotent (offline-replayable, B5) and
-enforce a per-window fraud guard. Balance changes are backend-authoritative; the wallet
-push is queued asynchronously (never blocks the < 3s cashier op).
+enforce a per-window fraud guard. Balance changes are backend-authoritative; after a
+successful commit the new balance is reflected into the wallet best-effort (Phase 4) —
+a wallet failure never fails the operation, and replays don't re-push.
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated
@@ -22,15 +24,22 @@ from conpass_common.idempotency import IdempotencyStore, StoredResponse, run_ide
 from conpass_common.models import (
     AccessDecision,
     AccrueRequest,
+    CardResolution,
     OperationResult,
     RedeemRequest,
     ScanResolveRequest,
     ValidateAccessRequest,
 )
+from conpass_common.providers import get_wallet_provider
+from conpass_common.providers.wallet import build_pass_content
 from fastapi import Header
 
 from . import logic
 from .repository import CardRow, OperationsRepository, SupabaseRepository, TxnRow
+
+log = logging.getLogger(__name__)
+# Card's enrollment link base (mirrors the programs service).
+ENROLL_BASE = "https://conpass.cards/e"
 
 app = create_app(service="operations")
 
@@ -78,16 +87,87 @@ def _operation_result(card: CardRow, txn: TxnRow) -> dict:
     }).model_dump(by_alias=True, exclude_none=True)
 
 
+def _program_model(p: dict) -> dict:
+    # Program schema requires >=1 wallet; single-issuer default is google.
+    return {
+        "id": p["id"], "merchantId": p["merchant_id"], "type": p["type"],
+        "name": p["name"], "mechanic": p.get("mechanic"),
+        "stampsForReward": p.get("stamps_for_reward"),
+        "pointsForReward": p.get("points_for_reward"),
+        "pointsPerDollar": (float(p["points_per_dollar"])
+                            if p.get("points_per_dollar") is not None else None),
+        "reward": p.get("reward"),
+        "membershipValidity": p.get("membership_validity"),
+        "membershipIncludes": p.get("membership_includes"),
+        "welcomeBonus": p.get("welcome_bonus", 0),
+        "expiryDays": p.get("expiry_days"),
+        "appearance": {
+            "color": p.get("color"),
+            "iconStorageKey": p.get("icon_storage_key"),
+            "backgroundStorageKey": p.get("background_storage_key"),
+        },
+        "wallets": p.get("wallets") or ["google"],
+        "active": p.get("active", True),
+        "enrollmentUrl": f"{ENROLL_BASE}/{p['id']}",
+        "createdAt": p["created_at"],
+    }
+
+
+def _card_model(c: dict, program: dict) -> dict:
+    mechanic = program.get("mechanic") or (
+        "points" if c["type"] == "loyalty_points" else "stamps")
+    return {
+        "id": c["id"], "programId": c["program_id"], "merchantId": c["merchant_id"],
+        "customerId": c.get("customer_id"), "type": c["type"],
+        "opaqueToken": c["opaque_token"],
+        "balance": {
+            "mechanic": mechanic,
+            "stamps": c.get("stamps", 0),
+            "stampsForReward": program.get("stamps_for_reward"),
+            "points": c.get("points", 0),
+            "pointsForReward": program.get("points_for_reward"),
+            "rewardsAvailable": c.get("rewards_available", 0),
+            "membershipActiveUntil": c.get("membership_active_until"),
+        },
+        "holderName": c.get("holder_name"),
+        "active": c.get("active", True),
+        "walletInstalled": c.get("wallet_installed", False),
+        "createdAt": c["created_at"],
+    }
+
+
+def _push_wallet_update(repo: OperationsRepository, card_id: str) -> None:
+    """Reflect a just-committed balance change into the installed pass. Best-effort:
+    a wallet failure must never fail the (backend-authoritative) in-store operation,
+    and this runs after commit so it can't extend the transaction."""
+    try:
+        card = repo.get_card_row(card_id)
+        if card is None:
+            return
+        program = repo.get_program(card["program_id"])
+        if program is None:
+            return
+        merchant = repo.get_merchant(card["merchant_id"])
+        get_wallet_provider().update(build_pass_content(card, program, merchant))
+    except Exception:  # noqa: BLE001 - wallet reflection is non-critical
+        log.warning("wallet update failed for card %s", card_id, exc_info=True)
+
+
 @app.post("/operations/resolve")
 def resolve_scan(body: ScanResolveRequest, identity: CurrentIdentity):
     identity.require_role("merchant_owner", "operation_user")
     repo = get_repo()
-    card = repo.get_card_by_token(body.code)
+    card = repo.get_card_row_by_token(body.code)
     if card is None:
         raise NotFound("card not found for code")
-    identity.require_merchant(card.merchant_id)
-    # Phase 3: hydrate the full Program (name/appearance/wallets) for the cashier UI.
-    raise NotImplementedYet("Phase 3")
+    identity.require_merchant(card["merchant_id"])
+    program = repo.get_program(card["program_id"])
+    if program is None:
+        raise NotFound("program not found")
+    return CardResolution.model_validate({
+        "card": _card_model(card, program),
+        "program": _program_model(program),
+    }).model_dump(by_alias=True, exclude_none=True)
 
 
 @app.post("/operations/accrue")
@@ -118,6 +198,7 @@ def accrue(
         txn = TxnRow(str(uuid.uuid4()), card.id, outcome.kind, outcome.stamps_delta,
                      outcome.points_delta, str(body.operationUserId), _now())
         repo.commit(card, txn)
+        _push_wallet_update(repo, card.id)
         return StoredResponse(200, _operation_result(card, txn))
 
     return run_idempotent(get_idempotency_store(), key=key, endpoint="accrue",
@@ -146,6 +227,7 @@ def redeem(
         txn = TxnRow(str(uuid.uuid4()), card.id, "redeem", 0, 0,
                      str(body.operationUserId), _now())
         repo.commit(card, txn)
+        _push_wallet_update(repo, card.id)
         return StoredResponse(200, _operation_result(card, txn))
 
     return run_idempotent(get_idempotency_store(), key=key, endpoint="redeem",

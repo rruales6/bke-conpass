@@ -25,9 +25,13 @@ DEFAULT_SECRETS_FILE = "/Users/jruales/secrets/secrets.yaml"
 ROOT = "conpass"  # secrets are nested under this key
 
 
+def _secrets_path() -> Path:
+    return Path(os.environ.get("CONPASS_SECRETS_FILE", DEFAULT_SECRETS_FILE))
+
+
 @lru_cache(maxsize=1)
 def _secrets() -> dict[str, Any]:
-    path = Path(os.environ.get("CONPASS_SECRETS_FILE", DEFAULT_SECRETS_FILE))
+    path = _secrets_path()
     if yaml is None or not path.exists():
         return {}
     with path.open() as fh:
@@ -85,6 +89,26 @@ class Settings:
     @property
     def google_wallet_service_account_json(self) -> str | None:
         return _get("google_wallet", "service_account_json", env="GOOGLE_WALLET_SA_JSON")
+
+    @property
+    def google_wallet_sa_content(self) -> str | None:
+        """The service-account key as JSON *content* (never a path).
+
+        `google_wallet_service_account_json` may be inline JSON or a filename. In a
+        deployed Lambda the value is injected inline (with_env.py resolves it before
+        `serverless deploy`); locally it is a filename resolved relative to the
+        secrets.yaml directory. Returns None when unset or the file is missing.
+        """
+        ref = self.google_wallet_service_account_json
+        if not ref:
+            return None
+        ref = ref.strip()
+        if ref.startswith("{"):
+            return ref
+        p = Path(ref)
+        if not p.is_absolute():
+            p = _secrets_path().parent / p
+        return p.read_text() if p.exists() else None
 
     # --- Provider selection (stubbed by default per D9/D10) ---
     @property

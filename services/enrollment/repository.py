@@ -12,6 +12,10 @@ class EnrollmentRepository:
         rows = self._c.table("programs").select("*").eq("id", program_id).execute().data
         return rows[0] if rows else None
 
+    def get_merchant(self, merchant_id: str) -> dict | None:
+        rows = self._c.table("merchants").select("*").eq("id", merchant_id).execute().data
+        return rows[0] if rows else None
+
     def find_card_by_dedupe(self, program_id: str, dedupe_key: str) -> dict | None:
         rows = self._c.table("cards").select("*").eq(
             "program_id", program_id).eq("dedupe_key", dedupe_key).execute().data

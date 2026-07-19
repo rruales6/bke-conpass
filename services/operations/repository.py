@@ -38,6 +38,11 @@ class OperationsRepository(Protocol):
     def get_rules(self, program_id: str) -> ProgramRules | None: ...
     def recent_accrual_count(self, card_id: str, within_seconds: int) -> int: ...
     def commit(self, card: CardRow, txn: TxnRow) -> None: ...
+    # Raw-row reads for scan resolution + wallet reflection (Phase 4).
+    def get_card_row(self, card_id: str) -> dict | None: ...
+    def get_card_row_by_token(self, token: str) -> dict | None: ...
+    def get_program(self, program_id: str) -> dict | None: ...
+    def get_merchant(self, merchant_id: str) -> dict | None: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -48,6 +53,22 @@ class InMemoryRepository:
     cards: dict[str, CardRow] = field(default_factory=dict)
     rules: dict[str, ProgramRules] = field(default_factory=dict)
     txns: list[TxnRow] = field(default_factory=list)
+    card_rows: dict[str, dict] = field(default_factory=dict)
+    programs: dict[str, dict] = field(default_factory=dict)
+    merchants: dict[str, dict] = field(default_factory=dict)
+
+    def get_card_row(self, card_id: str) -> dict | None:
+        return self.card_rows.get(card_id)
+
+    def get_card_row_by_token(self, token: str) -> dict | None:
+        return next((r for r in self.card_rows.values()
+                     if r.get("opaque_token") == token), None)
+
+    def get_program(self, program_id: str) -> dict | None:
+        return self.programs.get(program_id)
+
+    def get_merchant(self, merchant_id: str) -> dict | None:
+        return self.merchants.get(merchant_id)
 
     def get_card(self, card_id: str) -> CardRow | None:
         return self.cards.get(card_id)
@@ -91,6 +112,22 @@ class SupabaseRepository:
     def get_card_by_token(self, token: str) -> CardRow | None:
         rows = self._c().table("cards").select("*").eq("opaque_token", token).execute().data
         return _row_to_card(rows[0]) if rows else None
+
+    def get_card_row(self, card_id: str) -> dict | None:
+        rows = self._c().table("cards").select("*").eq("id", card_id).execute().data
+        return rows[0] if rows else None
+
+    def get_card_row_by_token(self, token: str) -> dict | None:
+        rows = self._c().table("cards").select("*").eq("opaque_token", token).execute().data
+        return rows[0] if rows else None
+
+    def get_program(self, program_id: str) -> dict | None:
+        rows = self._c().table("programs").select("*").eq("id", program_id).execute().data
+        return rows[0] if rows else None
+
+    def get_merchant(self, merchant_id: str) -> dict | None:
+        rows = self._c().table("merchants").select("*").eq("id", merchant_id).execute().data
+        return rows[0] if rows else None
 
     def get_rules(self, program_id: str) -> ProgramRules | None:
         rows = self._c().table("programs").select(

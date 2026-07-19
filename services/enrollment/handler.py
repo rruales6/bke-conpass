@@ -6,6 +6,7 @@ card. Wallet add-links are filled by the WalletProvider in Phase 4 (Google).
 """
 from __future__ import annotations
 
+import logging
 import secrets
 from datetime import date, timedelta
 from typing import Annotated
@@ -14,11 +15,14 @@ from conpass_common import create_app, lambda_handler
 from conpass_common.errors import NotFound, ValidationFailed
 from conpass_common.idempotency import IdempotencyStore, StoredResponse, run_idempotent
 from conpass_common.models import EnrollmentRequest
+from conpass_common.providers import get_wallet_provider
+from conpass_common.providers.wallet import build_pass_content
 from fastapi import Header
 from fastapi.responses import JSONResponse
 
 from .repository import EnrollmentRepository
 
+log = logging.getLogger(__name__)
 app = create_app(service="enrollment")
 
 _VALIDITY_DAYS = {"monthly": 30, "quarterly": 90, "annual": 365, "per_event": None}
@@ -41,7 +45,7 @@ def _holder_name(full_name: str | None) -> str | None:
     return f"{parts[0]} {parts[-1][0]}."
 
 
-def _card_issued(card: dict, program: dict) -> dict:
+def _card_issued(card: dict, program: dict, wallet_links: dict | None = None) -> dict:
     mechanic = program.get("mechanic") or "stamps"
     return {
         "card": {
@@ -62,9 +66,27 @@ def _card_issued(card: dict, program: dict) -> dict:
             "walletInstalled": card.get("wallet_installed", False),
             "createdAt": card["created_at"],
         },
-        # Phase 4: WalletProvider.add_link fills google (and later apple).
-        "walletLinks": {},
+        "walletLinks": wallet_links or {},
     }
+
+
+def _wallet_links(repo: EnrollmentRepository, card: dict, program: dict, *,
+                  mutate: bool) -> dict:
+    """Best-effort "Add to Google Wallet" link. A wallet failure must never block
+    enrollment (backend is authority), so any error degrades to no links. `mutate`
+    issues/refreshes the pass object (new card); otherwise only re-mints the link
+    (dedupe replay), avoiding a redundant write.
+    """
+    try:
+        merchant = repo.get_merchant(card["merchant_id"])
+        content = build_pass_content(card, program, merchant)
+        provider = get_wallet_provider()
+        link = provider.issue(content).add_link if mutate else provider.add_link(content)
+        return {"google": link}
+    except Exception:  # noqa: BLE001 - wallet is non-critical to enrollment
+        log.warning("wallet link generation failed for card %s", card.get("id"),
+                    exc_info=True)
+        return {}
 
 
 @app.post("/programs/{program_id}/enroll")
@@ -86,7 +108,8 @@ def enroll_customer(
         if body.dedupeKey:
             existing = repo.find_card_by_dedupe(program_id, body.dedupeKey)
             if existing:
-                return StoredResponse(200, _card_issued(existing, program))
+                links = _wallet_links(repo, existing, program, mutate=False)
+                return StoredResponse(200, _card_issued(existing, program, links))
 
         merchant_id = program["merchant_id"]
         customer = repo.create_customer({
@@ -118,7 +141,8 @@ def enroll_customer(
             "membership_active_until": muntil,
             "dedupe_key": body.dedupeKey,
         })
-        return StoredResponse(201, _card_issued(card, program))
+        links = _wallet_links(repo, card, program, mutate=True)
+        return StoredResponse(201, _card_issued(card, program, links))
 
     result = run_idempotent(get_idempotency_store(), key=idempotency_key,
                             endpoint="enroll", payload=body.model_dump(mode="json"),

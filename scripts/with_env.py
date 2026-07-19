@@ -9,11 +9,25 @@ here — they come from your `aws` CLI login (profile/SSO) or the environment.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 
 sys.path.insert(0, "layers/common/python")
 from conpass_common.config import settings  # noqa: E402
+
+
+def _sa_json_min() -> str | None:
+    """Resolve the service-account key to *minified* JSON content.
+
+    The Lambda receives the key inline via this env var (a bare path would not
+    resolve at runtime). Minifying keeps all env vars under AWS Lambda's 4 KB total.
+    """
+    content = settings.google_wallet_sa_content
+    if not content:
+        return None
+    return json.dumps(json.loads(content), separators=(",", ":"))
+
 
 ENV = {
     "SUPABASE_URL": settings.supabase_url,
@@ -21,7 +35,7 @@ ENV = {
     "SUPABASE_SECRET_KEY": settings.supabase_secret_key,
     "SUPABASE_JWKS_URL": settings.supabase_jwks_url,
     "GOOGLE_WALLET_ISSUER_ID": settings.google_wallet_issuer_id,
-    "GOOGLE_WALLET_SA_JSON": settings.google_wallet_service_account_json,
+    "GOOGLE_WALLET_SA_JSON": _sa_json_min(),
     "AWS_REGION": settings.aws_region,
     "CONPASS_CORS_ORIGINS": ",".join(settings.cors_origins),
 }
