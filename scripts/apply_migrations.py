@@ -28,24 +28,37 @@ def _connect() -> psycopg.Connection:
     if not url:
         sys.exit("conpass.supabase.db_url not configured")
     u = urlparse(url)
-    ref = u.hostname.split(".")[1] if u.hostname.startswith("db.") else u.hostname.split(".")[0]
+    user = unquote(u.username or "postgres")
     pwd = unquote(u.password or "")
+    # The pooler user is `postgres.<ref>`; a direct host is db.<ref>.supabase.co.
+    if user.startswith("postgres."):
+        ref = user.split(".", 1)[1]
+    elif (u.hostname or "").startswith("db."):
+        ref = u.hostname.split(".")[1]
+    else:
+        ref = (u.hostname or "").split(".")[0]
+    # Migrations run DDL, which needs SESSION mode. The db_url uses the 6543 transaction
+    # pooler (for the app's runtime pooling) — force 5432 (session) here. autocommit=True is
+    # ESSENTIAL: without it the tracker SELECT leaves a txn open, turning each
+    # `with conn.transaction()` into a savepoint that never top-level commits, so close()
+    # silently rolls everything back (migrations printed "applied" but never persisted).
+    port = 5432 if (u.port in (None, 6543)) else u.port
 
     # 1) Try the configured host directly (works when IPv6/direct is reachable).
     try:
-        return psycopg.connect(host=u.hostname, port=u.port or 5432, dbname="postgres",
-                               user=unquote(u.username or "postgres"), password=pwd,
-                               sslmode="require", connect_timeout=8)
+        return psycopg.connect(host=u.hostname, port=port, dbname="postgres",
+                               user=user, password=pwd, sslmode="require",
+                               connect_timeout=8, autocommit=True)
     except Exception as exc:  # noqa: BLE001
         print(f"direct connect failed ({exc}); trying IPv4 session pooler…")
 
-    # 2) Auto-detect the pooler region.
+    # 2) Auto-detect the pooler region (session mode, port 5432).
     for reg in REGIONS:
         host = f"aws-0-{reg}.pooler.supabase.com"
         try:
             conn = psycopg.connect(host=host, port=5432, dbname="postgres",
                                    user=f"postgres.{ref}", password=pwd,
-                                   sslmode="require", connect_timeout=8)
+                                   sslmode="require", connect_timeout=8, autocommit=True)
             print(f"connected via session pooler ({reg})")
             return conn
         except Exception:  # noqa: BLE001, S112
