@@ -30,6 +30,22 @@ class MerchantsRepository:
     def delete_merchant(self, merchant_id: str) -> None:
         self._c.table("merchants").delete().eq("id", merchant_id).execute()
 
+    # --- demo sandbox (public GET /demo) ---
+    def latest_demo_merchant(self) -> dict | None:
+        rows = (self._c.table("merchants").select("*").eq("is_demo", True)
+                .order("created_at", desc=True).limit(1).execute().data)
+        return rows[0] if rows else None
+
+    def latest_program(self, merchant_id: str) -> dict | None:
+        rows = (self._c.table("programs").select("*").eq("merchant_id", merchant_id)
+                .eq("active", True).order("created_at", desc=True).limit(1).execute().data)
+        return rows[0] if rows else None
+
+    def owner_profile(self, merchant_id: str) -> dict | None:
+        rows = (self._c.table("profiles").select("*").eq("merchant_id", merchant_id)
+                .eq("role", "merchant_owner").limit(1).execute().data)
+        return rows[0] if rows else None
+
     # --- operation users ---
     def list_operation_users(self, merchant_id: str) -> list[dict]:
         return self._c.table("profiles").select("*").eq(

@@ -8,6 +8,7 @@ for first login (Función 03). Operators are provisioned the same way, tier-limi
 from __future__ import annotations
 
 from conpass_common import CurrentIdentity, create_app, lambda_handler
+from conpass_common.demo import DEMO_PASSWORD
 from conpass_common.errors import AppError, NotFound, TierLimit
 from conpass_common.models import (
     MerchantOnboardRequest,
@@ -87,6 +88,27 @@ def onboard_merchant(body: MerchantOnboardRequest):
         "ownerInviteSent": True,
         "ownerEmail": owner.email,
         "ownerTempPassword": owner.temp_password,
+    }
+
+
+@app.get("/demo")
+def get_demo_context():
+    """Public: the most-recent demo tenant + shared test credentials, so the /demo
+    sandbox can silently sign in. Demo logins only ever see demo-flagged data."""
+    repo = get_repo()
+    merchant = repo.latest_demo_merchant()
+    if merchant is None:
+        raise NotFound("no demo tenant is configured")
+    program = repo.latest_program(merchant["id"])
+    owner = repo.owner_profile(merchant["id"])
+    if program is None or owner is None:
+        raise NotFound("demo tenant is incomplete (missing program or owner)")
+    return {
+        "merchantId": merchant["id"],
+        "businessName": merchant["business_name"],
+        "programId": program["id"],
+        "ownerEmail": owner["email"],
+        "ownerPassword": DEMO_PASSWORD,
     }
 
 

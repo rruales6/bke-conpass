@@ -107,6 +107,9 @@ functions:
       - httpApi:
           method: POST
           path: /merchants
+      - httpApi:              # public self-serve demo context
+          method: GET
+          path: /demo
       - httpApi:
           method: GET
           path: /merchants/{merchantId}

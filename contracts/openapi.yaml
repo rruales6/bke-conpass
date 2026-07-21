@@ -19,6 +19,8 @@ tags:
     description: Liveness. Service:health
   - name: me
     description: Current authenticated identity. Service:identity
+  - name: demo
+    description: Public self-serve demo tenant context. Service:merchants
   - name: merchants
     description: Merchant (tenant) onboarding & subscription. Service:merchants
   - name: programs
@@ -66,6 +68,24 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Identity" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /demo:
+    get:
+      tags: [demo]
+      operationId: getDemoContext
+      summary: Public self-serve demo tenant context + shared test credentials
+      description: >
+        Returns the most-recently created demo merchant, its latest program, and the
+        shared demo login, so the unauthenticated /demo sandbox can silently sign in and
+        walk the full journey. Demo logins only ever see demo-flagged data (tenant RLS).
+      security: []
+      responses:
+        "200":
+          description: Demo context
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DemoContext" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /merchants:
     post:
@@ -1007,4 +1027,15 @@ components:
       properties:
         queued: { type: integer, description: Recipients queued. }
         provider: { type: string, description: "For now: 'stub'." }
+      additionalProperties: false
+
+    DemoContext:
+      type: object
+      required: [merchantId, businessName, programId, ownerEmail, ownerPassword]
+      properties:
+        merchantId: { type: string, format: uuid }
+        businessName: { type: string }
+        programId: { type: string, format: uuid, description: Latest program of the demo merchant — the public enroll journey targets it. }
+        ownerEmail: { type: string, format: email }
+        ownerPassword: { type: string, description: "Shared demo password — intentionally public (sandbox account, demo-only data)." }
       additionalProperties: false
