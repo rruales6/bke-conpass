@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from conpass_common import CurrentIdentity, create_app, lambda_handler
-from conpass_common.errors import Forbidden, NotFound, NotImplementedYet, TierLimit
+from conpass_common.db import service_client
+from conpass_common.errors import Forbidden, NotFound, TierLimit
 from conpass_common.models import ProgramCreate, ProgramUpdate
 
 from .repository import ProgramsRepository
@@ -126,14 +127,33 @@ def update_program(program_id: str, body: ProgramUpdate, identity: CurrentIdenti
     return _program_model(updated)
 
 
+def _program_metrics_model(row: dict | None) -> dict:
+    if row is None:
+        return {
+            "visits": 0, "redemptions": 0, "activeInstalledPasses": 0,
+            "installsThisWeek": 0, "eligibleForReminder": 0,
+            "churnRate": 0.0, "secondVisitRate30d": 0.0,
+        }
+    return {
+        "visits": row.get("visits", 0),
+        "redemptions": row.get("redemptions", 0),
+        "activeInstalledPasses": row.get("active_installed_passes", 0),
+        "installsThisWeek": row.get("installs_this_week", 0),
+        "eligibleForReminder": row.get("eligible_for_reminder", 0),
+        "churnRate": float(row.get("churn_rate") or 0),
+        "secondVisitRate30d": float(row.get("second_visit_rate_30d") or 0),
+    }
+
+
 @app.get("/programs/{program_id}/metrics")
 def get_program_metrics(program_id: str, identity: CurrentIdentity):
     p = get_repo().get(program_id)
     if p is None:
         raise NotFound("program not found")
     identity.require_merchant(p["merchant_id"])
-    # Aggregate metrics query lands in Phase 6 (second-visit rate, installs, churn).
-    raise NotImplementedYet("Phase 6")
+    rows = (service_client().table("program_metrics_view").select("*")
+            .eq("program_id", program_id).execute().data)
+    return _program_metrics_model(rows[0] if rows else None)
 
 
 handler = lambda_handler(app)

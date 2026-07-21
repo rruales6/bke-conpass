@@ -16,7 +16,6 @@ from conpass_common import CurrentIdentity, create_app, lambda_handler
 from conpass_common.errors import (
     Conflict,
     NotFound,
-    NotImplementedYet,
     RateLimited,
     ValidationFailed,
 )
@@ -32,7 +31,7 @@ from conpass_common.models import (
 )
 from conpass_common.providers import get_wallet_provider
 from conpass_common.providers.wallet import build_pass_content
-from fastapi import Header
+from fastapi import Header, Query
 
 from . import logic
 from .repository import CardRow, OperationsRepository, SupabaseRepository, TxnRow
@@ -255,12 +254,33 @@ def validate_access(
     }).model_dump(by_alias=True, exclude_none=True)
 
 
+def _redemption_model(r: dict) -> dict:
+    out = {
+        "id": r["id"], "customerName": r["customer_name"],
+        "programId": r["program_id"], "reward": r["reward"],
+        "redeemedAt": r["redeemed_at"],
+    }
+    if r.get("customer_phone") is not None:
+        out["customerPhone"] = r["customer_phone"]
+    if r.get("customer_email") is not None:
+        out["customerEmail"] = r["customer_email"]
+    if r.get("program") is not None:
+        out["program"] = r["program"]
+    return out
+
+
 @app.get("/programs/{program_id}/redemptions")
 def list_redemptions(program_id: str, identity: CurrentIdentity,
-                     from_: str | None = None, to: str | None = None):
+                     from_: Annotated[str | None, Query(alias="from")] = None,
+                     to: str | None = None):
     identity.require_role("merchant_owner", "operation_user")
-    # Reads redemptions_view filtered by program + date range.
-    raise NotImplementedYet("Phase 3")
+    repo = get_repo()
+    program = repo.get_program(program_id)
+    if program is None:
+        raise NotFound("program not found")
+    identity.require_merchant(program["merchant_id"])
+    rows = repo.list_redemptions(program_id, from_, to)
+    return [_redemption_model(r) for r in rows]
 
 
 handler = lambda_handler(app)

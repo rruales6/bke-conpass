@@ -43,6 +43,9 @@ class OperationsRepository(Protocol):
     def get_card_row_by_token(self, token: str) -> dict | None: ...
     def get_program(self, program_id: str) -> dict | None: ...
     def get_merchant(self, merchant_id: str) -> dict | None: ...
+    # Redemptions report (Phase 6).
+    def list_redemptions(self, program_id: str, from_: str | None,
+                         to: str | None) -> list[dict]: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -56,6 +59,7 @@ class InMemoryRepository:
     card_rows: dict[str, dict] = field(default_factory=dict)
     programs: dict[str, dict] = field(default_factory=dict)
     merchants: dict[str, dict] = field(default_factory=dict)
+    redemptions: list[dict] = field(default_factory=list)
 
     def get_card_row(self, card_id: str) -> dict | None:
         return self.card_rows.get(card_id)
@@ -90,6 +94,15 @@ class InMemoryRepository:
     def commit(self, card: CardRow, txn: TxnRow) -> None:
         self.cards[card.id] = card
         self.txns.append(txn)
+
+    def list_redemptions(self, program_id: str, from_: str | None,
+                         to: str | None) -> list[dict]:
+        rows = [r for r in self.redemptions if r.get("program_id") == program_id]
+        if from_ is not None:
+            rows = [r for r in rows if r["redeemed_at"] >= from_]
+        if to is not None:
+            rows = [r for r in rows if r["redeemed_at"] <= to]
+        return sorted(rows, key=lambda r: r["redeemed_at"], reverse=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -158,6 +171,16 @@ class SupabaseRepository:
             "kind": txn.kind, "stamps_delta": txn.stamps_delta,
             "points_delta": txn.points_delta, "operation_user_id": txn.operation_user_id,
         }).execute()
+
+    def list_redemptions(self, program_id: str, from_: str | None,
+                         to: str | None) -> list[dict]:
+        q = (self._c().table("redemptions_view").select("*")
+             .eq("program_id", program_id))
+        if from_ is not None:
+            q = q.gte("redeemed_at", from_)
+        if to is not None:
+            q = q.lte("redeemed_at", to)
+        return q.order("redeemed_at", desc=True).execute().data
 
 
 def _row_to_card(r: dict) -> CardRow:
