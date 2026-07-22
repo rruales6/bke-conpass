@@ -155,6 +155,53 @@ paths:
               schema: { $ref: "#/components/schemas/OperationUser" }
         "402": { $ref: "#/components/responses/TierLimit" }
 
+  /merchants/{merchantId}/operation-users/{operationUserId}:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+      - $ref: "#/components/parameters/OperationUserId"
+    patch:
+      tags: [merchants]
+      operationId: updateOperationUser
+      summary: Edit a cashier/operation account (name / email / station)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OperationUserUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperationUser" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [merchants]
+      operationId: deleteOperationUser
+      summary: Remove a cashier/operation account
+      responses:
+        "204": { description: Removed }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /merchants/{merchantId}/operation-users/{operationUserId}/reset-password:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+      - $ref: "#/components/parameters/OperationUserId"
+    post:
+      tags: [merchants]
+      operationId: resetOperationUserPassword
+      summary: Issue a new temporary password for a cashier/operation account
+      responses:
+        "200":
+          description: New temporary password
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperationUserPasswordReset" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /programs:
     get:
       tags: [programs]
@@ -217,6 +264,32 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Program" }
+
+  /programs/{programId}/appearance-upload-url:
+    parameters:
+      - $ref: "#/components/parameters/ProgramId"
+    post:
+      tags: [programs]
+      operationId: createAppearanceUploadUrl
+      summary: Presigned S3 PUT URL for a program icon / background asset
+      description: >
+        Owner-only. Returns a short-lived presigned S3 PUT URL the browser uploads
+        the image to directly, plus the storage key to persist via PATCH /programs
+        and the public URL used on the card + Google Wallet pass.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppearanceUploadRequest" }
+      responses:
+        "200":
+          description: Presigned upload target
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppearanceUploadResult" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
 
   /programs/{programId}/enroll:
     parameters:
@@ -524,6 +597,11 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    OperationUserId:
+      name: operationUserId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
     CardId:
       name: cardId
       in: path
@@ -733,12 +811,47 @@ components:
         station: { type: string, enum: [caja_1, caja_2, door_access] }
       additionalProperties: false
 
+    OperationUserUpdate:
+      type: object
+      properties:
+        name: { type: string }
+        email: { type: string, format: email }
+        station: { type: string, enum: [caja_1, caja_2, door_access] }
+      additionalProperties: false
+
+    OperationUserPasswordReset:
+      type: object
+      required: [id, tempPassword]
+      properties:
+        id: { type: string, format: uuid }
+        tempPassword: { type: string, description: Newly issued temporary password. }
+      additionalProperties: false
+
     ProgramAppearance:
       type: object
       properties:
         color: { type: string, description: Hex accent color. }
         iconStorageKey: { type: string, description: 512x512 PNG. }
         backgroundStorageKey: { type: string, description: 1032x336 JPG. }
+        iconUrl: { type: string, description: Public URL for the icon (read-only). }
+        backgroundUrl: { type: string, description: Public URL for the background (read-only). }
+      additionalProperties: false
+
+    AppearanceUploadRequest:
+      type: object
+      required: [kind, contentType]
+      properties:
+        kind: { type: string, enum: [icon, background] }
+        contentType: { type: string, enum: [image/png, image/jpeg] }
+      additionalProperties: false
+
+    AppearanceUploadResult:
+      type: object
+      required: [uploadUrl, storageKey, publicUrl]
+      properties:
+        uploadUrl: { type: string, description: Presigned S3 PUT URL (short-lived). }
+        storageKey: { type: string, description: S3 key to persist via PATCH /programs appearance. }
+        publicUrl: { type: string, description: Public HTTPS URL for the uploaded asset. }
       additionalProperties: false
 
     ProgramCreate:

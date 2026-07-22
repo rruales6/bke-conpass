@@ -88,6 +88,35 @@ def test_invalid_hex_color_is_dropped(provider):
     assert "hexBackgroundColor" not in obj
 
 
+def test_object_payload_maps_logo_and_hero_image(provider):
+    obj = provider._object_payload(_content(
+        logo_url="https://cdn.example/icon.png",
+        background_url="https://cdn.example/bg.jpg"))
+    assert obj["logo"]["sourceUri"]["uri"] == "https://cdn.example/icon.png"
+    assert obj["heroImage"]["sourceUri"]["uri"] == "https://cdn.example/bg.jpg"
+
+
+def test_object_payload_omits_images_when_absent(provider):
+    obj = provider._object_payload(_content())
+    assert "logo" not in obj and "heroImage" not in obj
+
+
+def test_public_asset_url_resolves_key(monkeypatch):
+    import conpass_common.assets as assets
+    monkeypatch.setattr(type(assets.settings), "program_assets_base_url",
+                        property(lambda self: "https://bucket.s3.us-east-1.amazonaws.com"))
+    assert assets.public_asset_url("programs/p1/icon-x.png") == (
+        "https://bucket.s3.us-east-1.amazonaws.com/programs/p1/icon-x.png")
+    assert assets.public_asset_url(None) is None
+
+
+def test_public_asset_url_none_when_unconfigured(monkeypatch):
+    import conpass_common.assets as assets
+    monkeypatch.setattr(type(assets.settings), "program_assets_base_url",
+                        property(lambda self: None))
+    assert assets.public_asset_url("programs/p1/icon-x.png") is None
+
+
 def test_save_link_is_signed_savetowallet_jwt(provider):
     link = provider._save_link(f"{ISSUER}.card_{CARD1}")
     assert link.startswith("https://pay.google.com/gp/v/save/")

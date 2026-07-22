@@ -13,10 +13,16 @@ from conpass_common.errors import AppError, NotFound, TierLimit
 from conpass_common.models import (
     MerchantOnboardRequest,
     OperationUserCreate,
+    OperationUserUpdate,
 )
 from conpass_common.providers import get_payment_provider
 from conpass_common.providers.payment import PaymentIntent
-from conpass_common.provisioning import provision_user
+from conpass_common.provisioning import (
+    delete_user,
+    provision_user,
+    reset_password,
+    update_user,
+)
 
 from .repository import MerchantsRepository
 
@@ -147,6 +153,54 @@ def add_operation_user(merchant_id: str, body: OperationUserCreate, identity: Cu
         "id": op.user_id, "name": body.name, "email": op.email,
         "station": body.station.value, "tempPassword": op.temp_password,
     }
+
+
+def _require_operation_user(
+    merchant_id: str, operation_user_id: str, identity: CurrentIdentity,
+) -> dict:
+    identity.require_role("merchant_owner")
+    identity.require_merchant(merchant_id)
+    existing = get_repo().get_operation_user(merchant_id, operation_user_id)
+    if existing is None:
+        raise NotFound("operation user not found")
+    return existing
+
+
+@app.patch("/merchants/{merchant_id}/operation-users/{operation_user_id}")
+def edit_operation_user(
+    merchant_id: str, operation_user_id: str,
+    body: OperationUserUpdate, identity: CurrentIdentity,
+):
+    existing = _require_operation_user(merchant_id, operation_user_id, identity)
+    update_user(
+        operation_user_id,
+        email=str(body.email) if body.email is not None else None,
+        station=body.station.value if body.station is not None else None,
+        name=body.name,
+    )
+    return {
+        "id": operation_user_id,
+        "name": body.name if body.name is not None else existing.get("name"),
+        "email": str(body.email) if body.email is not None else existing.get("email"),
+        "station": body.station.value if body.station is not None else existing.get("station"),
+    }
+
+
+@app.delete("/merchants/{merchant_id}/operation-users/{operation_user_id}", status_code=204)
+def remove_operation_user(merchant_id: str, operation_user_id: str, identity: CurrentIdentity):
+    _require_operation_user(merchant_id, operation_user_id, identity)
+    delete_user(operation_user_id)
+    get_repo().delete_operation_user_profile(merchant_id, operation_user_id)
+    return None
+
+
+@app.post("/merchants/{merchant_id}/operation-users/{operation_user_id}/reset-password")
+def reset_operation_user_password(
+    merchant_id: str, operation_user_id: str, identity: CurrentIdentity,
+):
+    _require_operation_user(merchant_id, operation_user_id, identity)
+    temp_password = reset_password(operation_user_id)
+    return {"id": operation_user_id, "tempPassword": temp_password}
 
 
 handler = lambda_handler(app)

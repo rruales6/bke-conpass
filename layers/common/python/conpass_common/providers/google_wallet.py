@@ -149,6 +149,12 @@ class GoogleWalletProvider(WalletProvider):
                 "sourceUri": {"uri": content.logo_url},
                 "contentDescription": _loc(content.merchant_name),
             }
+        if content.background_url:
+            # Banner across the front of the pass (GenericObject.heroImage).
+            obj["heroImage"] = {
+                "sourceUri": {"uri": content.background_url},
+                "contentDescription": _loc(content.program_name),
+            }
         return obj
 
     # --- WalletProvider interface -------------------------------------------

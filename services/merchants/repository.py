@@ -51,6 +51,18 @@ class MerchantsRepository:
         return self._c.table("profiles").select("*").eq(
             "merchant_id", merchant_id).eq("role", "operation_user").execute().data
 
+    def get_operation_user(self, merchant_id: str, user_id: str) -> dict | None:
+        rows = (self._c.table("profiles").select("*").eq("user_id", user_id)
+                .eq("merchant_id", merchant_id).eq("role", "operation_user")
+                .limit(1).execute().data)
+        return rows[0] if rows else None
+
+    def delete_operation_user_profile(self, merchant_id: str, user_id: str) -> None:
+        # profiles.user_id is a bare PK (no FK to auth.users), so removing the auth
+        # user does not cascade — drop the profile row explicitly.
+        (self._c.table("profiles").delete().eq("user_id", user_id)
+         .eq("merchant_id", merchant_id).eq("role", "operation_user").execute())
+
     def count_operation_users(self, merchant_id: str) -> int:
         res = self._c.table("profiles").select("user_id", count="exact").eq(
             "merchant_id", merchant_id).eq("role", "operation_user").execute()

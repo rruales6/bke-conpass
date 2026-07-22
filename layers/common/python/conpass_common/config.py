@@ -81,6 +81,26 @@ class Settings:
     def aws_region(self) -> str:
         return _get("aws", "region", env="AWS_REGION", default="us-east-1")
 
+    # --- Program assets (S3, public-read) ---
+    @property
+    def program_assets_bucket(self) -> str | None:
+        """S3 bucket holding program icon/background images (public-read)."""
+        return _get("aws", "program_assets_bucket", env="PROGRAM_ASSETS_BUCKET")
+
+    @property
+    def program_assets_base_url(self) -> str | None:
+        """Public HTTPS base for program assets (used on the card + Google Wallet pass).
+
+        Explicit override wins; otherwise derived from the bucket + region so a
+        stored key becomes `<base>/<key>`.
+        """
+        if (override := os.environ.get("PROGRAM_ASSETS_BASE_URL")):
+            return override.rstrip("/")
+        bucket = self.program_assets_bucket
+        if not bucket:
+            return None
+        return f"https://{bucket}.s3.{self.aws_region}.amazonaws.com"
+
     # --- Google Wallet ---
     @property
     def google_wallet_issuer_id(self) -> str | None:

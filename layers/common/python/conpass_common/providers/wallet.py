@@ -11,6 +11,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from ..assets import public_asset_url
+
 
 class WalletKind(StrEnum):
     GOOGLE = "google"
@@ -98,4 +100,6 @@ def build_pass_content(card: dict, program: dict, merchant: dict | None) -> Pass
         reward_text=program.get("reward"),
         membership_active_until=mu.isoformat() if hasattr(mu, "isoformat") else mu,
         accent_color=program.get("color"),
+        logo_url=public_asset_url(program.get("icon_storage_key")),
+        background_url=public_asset_url(program.get("background_storage_key")),
     )

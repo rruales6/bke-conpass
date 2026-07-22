@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 from conpass_common import CurrentIdentity, create_app, lambda_handler
+from conpass_common.assets import presign_upload, public_asset_url
 from conpass_common.db import service_client
-from conpass_common.errors import Forbidden, NotFound, TierLimit
-from conpass_common.models import ProgramCreate, ProgramUpdate
+from conpass_common.errors import Forbidden, NotFound, TierLimit, ValidationFailed
+from conpass_common.models import AppearanceUploadRequest, ProgramCreate, ProgramUpdate
 
 from .repository import ProgramsRepository
 
@@ -34,6 +35,8 @@ def _program_model(p: dict) -> dict:
             "color": p.get("color"),
             "iconStorageKey": p.get("icon_storage_key"),
             "backgroundStorageKey": p.get("background_storage_key"),
+            "iconUrl": public_asset_url(p.get("icon_storage_key")),
+            "backgroundUrl": public_asset_url(p.get("background_storage_key")),
         },
         "wallets": p.get("wallets") or [],
         "active": p.get("active", True),
@@ -125,6 +128,25 @@ def update_program(program_id: str, body: ProgramUpdate, identity: CurrentIdenti
             patch["background_storage_key"] = ap.backgroundStorageKey
     updated = repo.update(program_id, patch) if patch else p
     return _program_model(updated)
+
+
+@app.post("/programs/{program_id}/appearance-upload-url")
+def create_appearance_upload_url(
+    program_id: str, body: AppearanceUploadRequest, identity: CurrentIdentity,
+):
+    identity.require_role("merchant_owner")
+    p = get_repo().get(program_id)
+    if p is None:
+        raise NotFound("program not found")
+    identity.require_merchant(p["merchant_id"])
+    try:
+        return presign_upload(
+            program_id=program_id,
+            kind=body.kind.value,
+            content_type=body.contentType.value,
+        )
+    except ValueError as exc:
+        raise ValidationFailed(str(exc)) from exc
 
 
 def _program_metrics_model(row: dict | None) -> dict:

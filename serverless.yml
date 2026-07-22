@@ -32,6 +32,15 @@ provider:
     SUPABASE_JWKS_URL: ${env:SUPABASE_JWKS_URL, ""}
     GOOGLE_WALLET_ISSUER_ID: ${env:GOOGLE_WALLET_ISSUER_ID, ""}
     GOOGLE_WALLET_SA_JSON: ${env:GOOGLE_WALLET_SA_JSON, ""}
+    PROGRAM_ASSETS_BUCKET: conpass-program-assets-${self:provider.stage}
+  iam:
+    role:
+      statements:
+        # Presigned-PUT of program icon/background images (programs Lambda signs with
+        # the execution role, so it needs PutObject on the assets bucket).
+        - Effect: Allow
+          Action: s3:PutObject
+          Resource: arn:aws:s3:::conpass-program-assets-${self:provider.stage}/*
   httpApi:
     # Explicit CORS at the gateway (cors:true would be wildcard * and omit Idempotency-Key).
     cors:
@@ -119,6 +128,15 @@ functions:
       - httpApi:
           method: POST
           path: /merchants/{merchantId}/operation-users
+      - httpApi:
+          method: PATCH
+          path: /merchants/{merchantId}/operation-users/{operationUserId}
+      - httpApi:
+          method: DELETE
+          path: /merchants/{merchantId}/operation-users/{operationUserId}
+      - httpApi:
+          method: POST
+          path: /merchants/{merchantId}/operation-users/{operationUserId}/reset-password
 
   programs:
     <<: *fnDefaults
@@ -137,6 +155,9 @@ functions:
       - httpApi:
           method: PATCH
           path: /programs/{programId}
+      - httpApi:
+          method: POST
+          path: /programs/{programId}/appearance-upload-url
       - httpApi:
           method: GET
           path: /programs/{programId}/metrics
@@ -208,3 +229,42 @@ functions:
     package: { patterns: ["!**", "services/notifications/**"] }
     events:
       - httpApi: { method: POST, path: /notifications/reminders }
+
+resources:
+  Resources:
+    # Public-read bucket for program icon/background images. Objects are uploaded by the
+    # browser via presigned PUT and must be publicly fetchable so the Google Wallet pass
+    # (logo / heroImage) and the in-app card preview can load them over HTTPS.
+    ProgramAssetsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: conpass-program-assets-${self:provider.stage}
+        OwnershipControls:
+          Rules:
+            - ObjectOwnership: BucketOwnerEnforced   # ACLs disabled; access via bucket policy
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          IgnorePublicAcls: true
+          BlockPublicPolicy: false                   # we attach a public-read policy below
+          RestrictPublicBuckets: false
+        CorsConfiguration:
+          CorsRules:
+            - AllowedMethods: [PUT]
+              AllowedOrigins:
+                - https://conpass.cards
+                - https://d2gwyvyec58l70.cloudfront.net
+                - http://localhost:5173
+              AllowedHeaders: ["*"]
+              MaxAge: 3600
+    ProgramAssetsBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: { Ref: ProgramAssetsBucket }
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: PublicReadProgramAssets
+              Effect: Allow
+              Principal: "*"
+              Action: s3:GetObject
+              Resource: arn:aws:s3:::conpass-program-assets-${self:provider.stage}/*
