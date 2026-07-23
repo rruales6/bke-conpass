@@ -20,7 +20,7 @@ provider:
   architecture: arm64            # Graviton — cheaper + faster (D2)
   region: us-east-1              # pinned: matches Supabase; ACM for CloudFront must be here
   stage: ${opt:stage, "dev"}
-  memorySize: 256
+  memorySize: 512               # more memory = more CPU at init → faster cold start (P7)
   timeout: 15
   logRetentionInDays: 14
   environment:
@@ -65,10 +65,15 @@ provider:
 custom:
   pythonRequirements:
     layer: true                  # build deps into their own layer (shared across fns)
-    # slim strips *.dist-info, which breaks importlib.metadata (email-validator, pulled by
-    # pydantic EmailStr, reads its own version at import). Phase 7: re-enable with
-    # slimPatternsAppendDefaults:false + patterns limited to *.pyc/__pycache__.
-    slim: false
+    # slim trims the layer. Default slim ALSO strips *.dist-info, which breaks
+    # importlib.metadata (email-validator, pulled by pydantic EmailStr, reads its own
+    # version at import) — so override the patterns to strip ONLY bytecode and KEEP
+    # dist-info. The big size win comes from fastapi-slim (no uvicorn/watchfiles/…).
+    slim: true
+    slimPatternsAppendDefaults: false
+    slimPatterns:
+      - "**/*.pyc"
+      - "**/__pycache__/**"
     dockerizePip: true           # build manylinux aarch64 wheels (needs Docker running)
     useDownloadCache: true
     useStaticCache: true

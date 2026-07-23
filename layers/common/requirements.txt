@@ -2,7 +2,8 @@
 # `common` Lambda layer. Kept intentionally small for lean cold starts.
 # Wallet vendor SDKs (google-auth, etc.) are NOT here — they are added only to the
 # functions that issue/update passes (Phase 4) so other Lambdas don't pay for them.
-fastapi==0.111.0
+fastapi-slim==0.111.0      # same fastapi 0.111 code, WITHOUT the uvicorn/fastapi-cli/
+                           # watchfiles/httptools/uvloop extras (dead weight under Mangum)
 mangum==0.17.0
 pydantic==2.13.4           # aligned with supabase 2.31's requirement (2.7.x conflicts)
 PyJWT[crypto]==2.13.0      # [crypto] pulls `cryptography` for ES256/RS256 JWKS verify
