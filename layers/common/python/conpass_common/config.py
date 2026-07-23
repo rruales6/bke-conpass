@@ -153,7 +153,8 @@ class Settings:
         # test distribution too. (Remove the cloudfront.net entry once conpass.cards is live.)
         return [
             "https://conpass.cards",
-            "https://d2gwyvyec58l70.cloudfront.net",  # test site (S3+CloudFront)
+            "https://console.conpass.cards",          # operator console (live frontend)
+            "https://d2gwyvyec58l70.cloudfront.net",  # CloudFront the console CNAMEs to
             "http://localhost:5173",
             "http://localhost:3000",
         ]

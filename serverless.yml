@@ -46,7 +46,8 @@ provider:
     cors:
       allowedOrigins:
         - https://conpass.cards
-        - https://d2gwyvyec58l70.cloudfront.net   # test site (remove once conpass.cards is live)
+        - https://console.conpass.cards           # operator console (live frontend, Phase 8)
+        - https://d2gwyvyec58l70.cloudfront.net   # CloudFront the console CNAMEs to
         - http://localhost:5173
       allowedHeaders:
         - Content-Type
