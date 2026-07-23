@@ -58,7 +58,11 @@ class IdempotencyStore:
             "endpoint": endpoint,
             "request_hash": req_hash,
             "response_status": resp.status,
-            "response_body": resp.body,
+            # Normalize to JSON-safe primitives: response bodies can carry UUID/datetime
+            # objects (Pydantic `format: uuid`/date-time fields) that the Data API's raw
+            # json.dumps can't serialize — that would 500 AFTER the mutation committed,
+            # leaving the key unrecorded so replays re-apply the operation.
+            "response_body": json.loads(json.dumps(resp.body, default=str)),
         }).execute()
 
 
