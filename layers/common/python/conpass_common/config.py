@@ -101,6 +101,13 @@ class Settings:
             return None
         return f"https://{bucket}.s3.{self.aws_region}.amazonaws.com"
 
+    # --- Payment proofs (S3, private) ---
+    @property
+    def payment_proofs_bucket(self) -> str | None:
+        """S3 bucket holding manual-transfer receipts. Never public — receipts carry
+        names, bank accounts and amounts; platform-admin reads them via presigned GET."""
+        return _get("aws", "payment_proofs_bucket", env="PAYMENT_PROOFS_BUCKET")
+
     # --- Google Wallet ---
     @property
     def google_wallet_issuer_id(self) -> str | None:

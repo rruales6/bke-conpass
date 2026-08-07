@@ -7,14 +7,20 @@ for first login (Función 03). Operators are provisioned the same way, tier-limi
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from conpass_common import CurrentIdentity, create_app, lambda_handler
+from conpass_common.assets import presign_payment_proof_upload
 from conpass_common.demo import DEMO_PASSWORD
-from conpass_common.errors import AppError, NotFound, TierLimit
+from conpass_common.errors import AppError, NotConfigured, NotFound, TierLimit, ValidationFailed
 from conpass_common.models import (
     MerchantOnboardRequest,
+    Method,
     OperationUserCreate,
     OperationUserUpdate,
+    PaymentProofUploadRequest,
 )
+from conpass_common.payment_settings import payment_settings_model
 from conpass_common.providers import get_payment_provider
 from conpass_common.providers.payment import PaymentIntent
 from conpass_common.provisioning import (
@@ -25,6 +31,10 @@ from conpass_common.provisioning import (
 )
 
 from .repository import MerchantsRepository
+
+# Manual-transfer / DEUNA payments can't be confirmed without a receipt — platform-admin
+# has nothing to check against otherwise.
+PROOF_REQUIRED_METHODS = {Method.deuna, Method.manual_transfer}
 
 app = create_app(service="merchants")
 
@@ -58,8 +68,36 @@ def _merchant_model(m: dict, sub: dict | None = None) -> dict:
     return out
 
 
+@app.get("/payment-settings")
+def get_payment_settings():
+    """Public: the transfer/DEUNA account details shown on the signup page (Función
+    02) — platform-admin maintains them in Función 04 (PATCH /admin/payment-settings)."""
+    return payment_settings_model(get_repo().get_payment_settings())
+
+
+@app.post("/payment-proofs/upload-url")
+def create_payment_proof_upload_url(body: PaymentProofUploadRequest):
+    """Public: presigned PUT for a manual-transfer/DEUNA receipt, uploaded before the
+    account exists — the returned storageKey is submitted back as
+    payment.proofStorageKey on POST /merchants."""
+    try:
+        result = presign_payment_proof_upload(content_type=body.contentType.value)
+    except RuntimeError as exc:
+        raise NotConfigured(str(exc)) from exc
+    except ValueError as exc:
+        raise ValidationFailed(str(exc)) from exc
+    return {"uploadUrl": result["uploadUrl"], "storageKey": result["storageKey"]}
+
+
 @app.post("/merchants", status_code=201)
 def onboard_merchant(body: MerchantOnboardRequest):
+    proof_key = body.payment.proofStorageKey
+    if body.payment.method in PROOF_REQUIRED_METHODS and not proof_key:
+        raise ValidationFailed(
+            f"payment.proofStorageKey is required for payment.method="
+            f"{body.payment.method.value} — upload the receipt via "
+            f"POST /payment-proofs/upload-url first")
+
     repo = get_repo()
     merchant = repo.create_merchant({
         "business_name": body.businessName,
@@ -69,7 +107,11 @@ def onboard_merchant(body: MerchantOnboardRequest):
         "contact_name": body.contactName,
         "contact_email": body.contactEmail,
     })
-    sub = repo.create_subscription(merchant["id"], body.tier.value)
+    sub = repo.create_subscription(
+        merchant["id"], body.tier.value,
+        payment_proof_key=proof_key,
+        payment_proof_uploaded_at=datetime.now(UTC).isoformat() if proof_key else None,
+    )
 
     # Record payment (stub: manual proof; platform-admin confirms activation).
     get_payment_provider().submit(PaymentIntent(

@@ -33,3 +33,10 @@ class AdminRepository:
         rows = self._c.table("merchant_active_passes").select("*").eq(
             "merchant_id", merchant_id).execute().data
         return rows[0]["active_pass_count"] if rows else 0
+
+    # --- platform payment settings (no admin-side GET: the public /payment-settings
+    # endpoint already serves the same shape and needs no auth, so the console reads
+    # through that instead of duplicating a fetch here) ---
+    def update_payment_settings(self, patch: dict) -> dict:
+        return (self._c.table("platform_payment_settings").update(patch)
+                .eq("id", True).execute().data[0])

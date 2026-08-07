@@ -20,6 +20,10 @@ from .config import settings
 UPLOAD_URL_TTL_SECONDS = 300
 
 _EXT = {"image/png": "png", "image/jpeg": "jpg"}
+_PROOF_EXT = {**_EXT, "application/pdf": "pdf"}
+
+# Payment proofs are read back only by platform-admin, from a modal they just opened.
+PROOF_DOWNLOAD_TTL_SECONDS = 300
 
 
 def public_asset_url(storage_key: str | None) -> str | None:
@@ -45,17 +49,76 @@ def presign_upload(*, program_id: str, kind: str, content_type: str) -> dict:
         raise ValueError(f"unsupported content type: {content_type}")
 
     storage_key = f"programs/{program_id}/{kind}-{uuid.uuid4().hex}.{ext}"
+    return _presign_put(bucket, storage_key, content_type) | {
+        "storageKey": storage_key,
+        "publicUrl": public_asset_url(storage_key),
+    }
+
+
+def presign_payment_qr_upload(*, content_type: str) -> dict:
+    """Presigned PUT for the DEUNA QR shown on the public signup page.
+
+    The QR is meant to be seen by anonymous visitors, so it belongs in the same
+    public-read assets bucket as program images — under a `platform/` prefix, since it
+    is platform-level rather than tenant data.
+    """
+    bucket = settings.program_assets_bucket
+    if not bucket:
+        raise RuntimeError("program assets bucket not configured")
+
+    ext = _EXT.get(content_type)
+    if ext is None:
+        raise ValueError(f"unsupported content type: {content_type}")
+
+    storage_key = f"platform/payment-qr-{uuid.uuid4().hex}.{ext}"
+    return _presign_put(bucket, storage_key, content_type) | {
+        "storageKey": storage_key,
+        "publicUrl": public_asset_url(storage_key),
+    }
+
+
+def presign_payment_proof_upload(*, content_type: str) -> dict:
+    """Presigned PUT for a manual-transfer receipt, into the PRIVATE proofs bucket.
+
+    Signup is unauthenticated, so this URL is mintable by anyone; the random key means a
+    caller can only ever write to a path it was just handed, the bucket blocks all public
+    access, and reading an object back requires a platform-admin presigned GET.
+    """
+    bucket = settings.payment_proofs_bucket
+    if not bucket:
+        raise RuntimeError("payment proofs bucket not configured")
+
+    ext = _PROOF_EXT.get(content_type)
+    if ext is None:
+        raise ValueError(f"unsupported content type: {content_type}")
+
+    storage_key = f"payment-proofs/{uuid.uuid4().hex}.{ext}"
+    return _presign_put(bucket, storage_key, content_type) | {"storageKey": storage_key}
+
+
+def presign_payment_proof_download(storage_key: str) -> str:
+    """Short-lived presigned GET so platform-admin can inspect a receipt."""
+    bucket = settings.payment_proofs_bucket
+    if not bucket:
+        raise RuntimeError("payment proofs bucket not configured")
 
     import boto3  # lazy: only present in the Lambda runtime
 
-    client = boto3.client("s3", region_name=settings.aws_region)
-    upload_url = client.generate_presigned_url(
-        "put_object",
-        Params={"Bucket": bucket, "Key": storage_key, "ContentType": content_type},
-        ExpiresIn=UPLOAD_URL_TTL_SECONDS,
+    return boto3.client("s3", region_name=settings.aws_region).generate_presigned_url(
+        "get_object",
+        Params={"Bucket": bucket, "Key": storage_key},
+        ExpiresIn=PROOF_DOWNLOAD_TTL_SECONDS,
     )
+
+
+def _presign_put(bucket: str, storage_key: str, content_type: str) -> dict:
+    import boto3  # lazy: only present in the Lambda runtime
+
+    client = boto3.client("s3", region_name=settings.aws_region)
     return {
-        "uploadUrl": upload_url,
-        "storageKey": storage_key,
-        "publicUrl": public_asset_url(storage_key),
+        "uploadUrl": client.generate_presigned_url(
+            "put_object",
+            Params={"Bucket": bucket, "Key": storage_key, "ContentType": content_type},
+            ExpiresIn=UPLOAD_URL_TTL_SECONDS,
+        )
     }

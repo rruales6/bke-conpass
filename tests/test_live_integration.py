@@ -40,7 +40,9 @@ def test_full_loop():
             "businessName": "__conpass_it", "ruc": "0999999999001",
             "category": "cafe_restaurant", "city": "Quito",
             "contactName": "IT", "contactEmail": owner_email,
-            "tier": "growth", "payment": {"method": "manual_transfer"},
+            "tier": "growth",
+            "payment": {"method": "manual_transfer",
+                        "proofStorageKey": "payment-proofs/it-test.pdf"},
         })
         assert r.status_code == 201, r.text
         merchant_id = r.json()["merchant"]["id"]

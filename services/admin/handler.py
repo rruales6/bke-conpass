@@ -1,11 +1,27 @@
 """admin service — platform-admin, cross-tenant (Función 04). Requires platform_admin."""
+from datetime import UTC, datetime
+
 from conpass_common import CurrentIdentity, create_app, lambda_handler
-from conpass_common.errors import NotFound
-from conpass_common.models import SubscriptionUpdate
+from conpass_common.assets import presign_payment_proof_download, presign_payment_qr_upload
+from conpass_common.errors import NotConfigured, NotFound, ValidationFailed
+from conpass_common.models import PaymentQrUploadRequest, PaymentSettingsUpdate, SubscriptionUpdate
+from conpass_common.payment_settings import payment_settings_model
 
 from .repository import AdminRepository
 
 app = create_app(service="admin")
+
+# PaymentSettingsUpdate (camelCase) -> platform_payment_settings column (snake_case).
+_PAYMENT_SETTINGS_FIELDS = {
+    "bankName": "bank_name",
+    "accountType": "account_type",
+    "accountNumber": "account_number",
+    "beneficiaryName": "beneficiary_name",
+    "beneficiaryTaxId": "beneficiary_tax_id",
+    "contactEmail": "contact_email",
+    "instructions": "instructions",
+    "qrStorageKey": "qr_storage_key",
+}
 
 
 def get_repo() -> AdminRepository:
@@ -24,6 +40,9 @@ def _admin_client_model(m: dict, sub: dict | None) -> dict:
         out["nextChargeAt"] = sub["next_charge_at"]
     if sub and sub.get("last_payment_at") is not None:
         out["lastPaymentAt"] = sub["last_payment_at"]
+    out["hasPaymentProof"] = bool(sub and sub.get("payment_proof_key"))
+    if sub and sub.get("payment_proof_uploaded_at") is not None:
+        out["paymentProofUploadedAt"] = sub["payment_proof_uploaded_at"]
     return out
 
 
@@ -67,6 +86,43 @@ def update_subscription(merchant_id: str, body: SubscriptionUpdate, identity: Cu
 
     active_pass_count = repo.active_pass_count(merchant_id)
     return _subscription_model(updated, active_pass_count)
+
+
+@app.get("/admin/clients/{merchant_id}/payment-proof")
+def get_client_payment_proof(merchant_id: str, identity: CurrentIdentity):
+    identity.require_role("platform_admin")
+    sub = get_repo().get_subscription(merchant_id)
+    proof_key = sub.get("payment_proof_key") if sub else None
+    if not proof_key:
+        raise NotFound("this client has not uploaded a payment proof")
+    return {
+        "url": presign_payment_proof_download(proof_key),
+        "uploadedAt": sub.get("payment_proof_uploaded_at"),
+    }
+
+
+@app.patch("/admin/payment-settings")
+def update_payment_settings(body: PaymentSettingsUpdate, identity: CurrentIdentity):
+    identity.require_role("platform_admin")
+    # exclude_unset: only fields the caller actually sent are touched — an explicit ""
+    # clears a field, an absent field is left as-is. mode="json" turns AccountType into
+    # its plain string so it writes straight to the DB.
+    sent = body.model_dump(exclude_unset=True, mode="json")
+    patch = {_PAYMENT_SETTINGS_FIELDS[k]: v for k, v in sent.items()}
+    patch["updated_at"] = datetime.now(UTC).isoformat()
+    row = get_repo().update_payment_settings(patch)
+    return payment_settings_model(row)
+
+
+@app.post("/admin/payment-settings/qr-upload-url")
+def create_payment_qr_upload_url(body: PaymentQrUploadRequest, identity: CurrentIdentity):
+    identity.require_role("platform_admin")
+    try:
+        return presign_payment_qr_upload(content_type=body.contentType.value)
+    except RuntimeError as exc:
+        raise NotConfigured(str(exc)) from exc
+    except ValueError as exc:
+        raise ValidationFailed(str(exc)) from exc
 
 
 @app.get("/admin/stats")

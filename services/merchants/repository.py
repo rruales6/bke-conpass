@@ -12,9 +12,16 @@ class MerchantsRepository:
     def create_merchant(self, data: dict) -> dict:
         return self._c.table("merchants").insert(data).execute().data[0]
 
-    def create_subscription(self, merchant_id: str, tier: str) -> dict:
-        self._c.table("subscriptions").insert(
-            {"merchant_id": merchant_id, "tier": tier}).execute()
+    def create_subscription(
+        self, merchant_id: str, tier: str, *,
+        payment_proof_key: str | None = None,
+        payment_proof_uploaded_at: str | None = None,
+    ) -> dict:
+        data = {"merchant_id": merchant_id, "tier": tier}
+        if payment_proof_key is not None:
+            data["payment_proof_key"] = payment_proof_key
+            data["payment_proof_uploaded_at"] = payment_proof_uploaded_at
+        self._c.table("subscriptions").insert(data).execute()
         return self.get_subscription(merchant_id)
 
     def get_subscription(self, merchant_id: str) -> dict | None:
@@ -29,6 +36,12 @@ class MerchantsRepository:
 
     def delete_merchant(self, merchant_id: str) -> None:
         self._c.table("merchants").delete().eq("id", merchant_id).execute()
+
+    # --- platform payment settings (public GET /payment-settings) ---
+    def get_payment_settings(self) -> dict | None:
+        rows = (self._c.table("platform_payment_settings").select("*")
+                .eq("id", True).limit(1).execute().data)
+        return rows[0] if rows else None
 
     # --- demo sandbox (public GET /demo) ---
     def latest_demo_merchant(self) -> dict | None:

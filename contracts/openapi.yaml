@@ -87,12 +87,58 @@ paths:
               schema: { $ref: "#/components/schemas/DemoContext" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /payment-settings:
+    get:
+      tags: [merchants]
+      operationId: getPaymentSettings
+      summary: Public — platform transfer/DEUNA account details shown on the signup page
+      description: >
+        The account a subscribing merchant transfers into (Función 02 · B2B): bank,
+        account number, beneficiary, plus the DEUNA QR image. Platform-admin maintains
+        these in Función 04, so they can change without a redeploy. Public by design —
+        this is exactly the information a payer needs before transferring.
+      security: []
+      responses:
+        "200":
+          description: Payment settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentSettings" }
+
+  /payment-proofs/upload-url:
+    post:
+      tags: [merchants]
+      operationId: createPaymentProofUploadUrl
+      summary: Public — presigned S3 PUT URL for a manual-transfer payment proof
+      description: >
+        Signup is unauthenticated, and the proof must exist *before* the account can be
+        activated, so this endpoint is public. It returns a short-lived presigned PUT to
+        a PRIVATE bucket (receipts carry names, accounts and amounts); the returned
+        storage key is submitted back as `payment.proofStorageKey` on POST /merchants,
+        and only platform-admin can read the object back.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentProofUploadRequest" }
+      responses:
+        "200":
+          description: Presigned upload target
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentProofUploadResult" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
   /merchants:
     post:
       tags: [merchants]
       operationId: onboardMerchant
       summary: Onboard a merchant (B2B signup → tenant + subscription + owner)
-      description: Payment is recorded as manual proof for now (PaymentProvider stub).
+      description: >
+        Payment is recorded as manual proof for now (PaymentProvider stub). For the
+        manual-transfer / DEUNA methods `payment.proofStorageKey` is REQUIRED — the
+        account cannot be activated without a receipt for platform-admin to confirm.
       requestBody:
         required: true
         content:
@@ -543,6 +589,67 @@ paths:
               schema: { $ref: "#/components/schemas/Subscription" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /admin/clients/{merchantId}/payment-proof:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+    get:
+      tags: [admin]
+      operationId: getClientPaymentProof
+      summary: Platform-admin — short-lived link to the client's manual-transfer receipt
+      description: >
+        The proof lives in a private bucket; this mints a presigned GET so the admin can
+        inspect it before marking the subscription paid. 404 when the client never
+        uploaded one.
+      responses:
+        "200":
+          description: Presigned download target
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentProofLink" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /admin/payment-settings:
+    patch:
+      tags: [admin]
+      operationId: updatePaymentSettings
+      summary: Platform-admin — edit the transfer/DEUNA details shown on signup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentSettingsUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentSettings" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/payment-settings/qr-upload-url:
+    post:
+      tags: [admin]
+      operationId: createPaymentQrUploadUrl
+      summary: Platform-admin — presigned S3 PUT URL for the DEUNA QR image
+      description: >
+        The QR is displayed on the public signup page, so it goes to the public-read
+        assets bucket; persist the returned `storageKey` via PATCH /admin/payment-settings.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentQrUploadRequest" }
+      responses:
+        "200":
+          description: Presigned upload target
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppearanceUploadResult" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
   /admin/stats:
     get:
       tags: [admin]
@@ -733,7 +840,81 @@ components:
         method: { type: string, enum: [card, deuna, manual_transfer] }
         proofStorageKey:
           type: string
-          description: Supabase Storage key of the uploaded proof (manual_transfer).
+          description: >
+            Private-bucket key of the uploaded receipt, from
+            POST /payment-proofs/upload-url. REQUIRED for `deuna` / `manual_transfer`.
+      additionalProperties: false
+
+    PaymentSettings:
+      description: >
+        Platform-level transfer/DEUNA account the subscribing merchant pays into.
+        Single record, maintained by platform-admin (Función 04) and read publicly by
+        the signup page (Función 02).
+      type: object
+      required: [configured]
+      properties:
+        configured:
+          type: boolean
+          description: >
+            False until platform-admin fills in an account number — the signup page
+            then tells the visitor to contact conpass instead of transferring blind.
+        bankName: { type: string, description: "e.g. Banco Pichincha" }
+        accountType: { type: string, enum: [savings, checking] }
+        accountNumber: { type: string }
+        beneficiaryName: { type: string, description: Account holder shown to the payer. }
+        beneficiaryTaxId: { type: string, description: "Beneficiary RUC / cédula" }
+        contactEmail: { type: string, description: Where payers may also send the receipt. }
+        instructions: { type: string, description: Free-text note rendered under the details. }
+        qrImageUrl:
+          type: string
+          description: Public HTTPS URL of the DEUNA QR image (null until one is uploaded).
+        updatedAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    PaymentSettingsUpdate:
+      description: >
+        Partial update. Every field is optional; an explicit empty string clears it.
+        `qrStorageKey` comes from POST /admin/payment-settings/qr-upload-url.
+      type: object
+      properties:
+        bankName: { type: string }
+        accountType: { type: string, enum: [savings, checking] }
+        accountNumber: { type: string }
+        beneficiaryName: { type: string }
+        beneficiaryTaxId: { type: string }
+        contactEmail: { type: string }
+        instructions: { type: string }
+        qrStorageKey: { type: string }
+      additionalProperties: false
+
+    PaymentProofUploadRequest:
+      type: object
+      required: [contentType]
+      properties:
+        contentType: { type: string, enum: [image/png, image/jpeg, application/pdf] }
+      additionalProperties: false
+
+    PaymentProofUploadResult:
+      type: object
+      required: [uploadUrl, storageKey]
+      properties:
+        uploadUrl: { type: string, description: Short-lived presigned S3 PUT URL. }
+        storageKey: { type: string, description: Submit as payment.proofStorageKey. }
+      additionalProperties: false
+
+    PaymentProofLink:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string, description: Short-lived presigned S3 GET URL. }
+        uploadedAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    PaymentQrUploadRequest:
+      type: object
+      required: [contentType]
+      properties:
+        contentType: { type: string, enum: [image/png, image/jpeg] }
       additionalProperties: false
 
     MerchantOnboardResult:
@@ -1112,6 +1293,12 @@ components:
         since: { type: string, format: date }
         nextChargeAt: { type: string, format: date }
         lastPaymentAt: { type: string, format: date }
+        hasPaymentProof:
+          type: boolean
+          description: >
+            True when the client uploaded a manual-transfer receipt at signup — the admin
+            can then open it via GET /admin/clients/{merchantId}/payment-proof.
+        paymentProofUploadedAt: { type: string, format: date-time }
       additionalProperties: false
 
     PlatformStats:
