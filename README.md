@@ -20,8 +20,22 @@ Prod API: `https://c8glyvxjh7.execute-api.us-east-1.amazonaws.com` (us-east-1).
 ## Develop
 ```bash
 make install          # venv + deps
-make check            # ruff + pytest (17 tests; live integration skipped without secrets)
+make check            # ruff + pytest (70 tests; live integration skipped without secrets)
 make db-apply         # apply migrations (needs Supabase creds)
 ```
 Secrets live outside the repo in `~/secrets/secrets.yaml` under `conpass.*`
-(see [`.env.example`](.env.example)). Deploy: `scripts/deploy.sh conpass prod`.
+(see [`.env.example`](.env.example)).
+
+Deploy: `scripts/deploy.sh conpass prod [--force]`. Arguments after the stage pass through
+to `serverless deploy`; use **`--force`** for `serverless.yml`-only changes (new route,
+bucket, env var, IAM), which serverless otherwise no-ops. Don't trust the exit code —
+verify the stack, with the region set explicitly. Full runbook:
+[docs-conpass `aws/DEPLOY.md`](https://github.com/rruales6/docs-conpass/blob/master/aws/DEPLOY.md).
+
+## S3 buckets (provisioned by `serverless.yml`)
+`conpass-program-assets-<stage>` is **public-read** (program icon/background + the payment
+QR — all shown to anonymous visitors). `conpass-payment-proofs-<stage>` is **private**, with
+all four public-access blocks on: it holds subscription transfer receipts, written through a
+public presigned PUT and readable only via an admin-signed GET. Receipts must never move to
+the public bucket. Both have their own browser-upload CORS allowlist — a new frontend origin
+means updating both plus `httpApi.cors.allowedOrigins` and `config.cors_origins`.
