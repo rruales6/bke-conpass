@@ -32,3 +32,18 @@ class ProgramsRepository:
     def update(self, program_id: str, patch: dict) -> dict:
         return self._c.table("programs").update(patch).eq(
             "id", program_id).execute().data[0]
+
+    def list_card_rows(self, program_id: str, limit: int) -> list[dict]:
+        """Cards of a program, for reflecting an appearance change into installed passes."""
+        return self._c.table("cards").select("*").eq(
+            "program_id", program_id).limit(limit).execute().data
+
+    def count_cards(self, program_id: str) -> int:
+        res = self._c.table("cards").select("id", count="exact").eq(
+            "program_id", program_id).execute()
+        return res.count or 0
+
+    def get_merchant(self, merchant_id: str) -> dict | None:
+        rows = self._c.table("merchants").select("*").eq(
+            "id", merchant_id).execute().data
+        return rows[0] if rows else None

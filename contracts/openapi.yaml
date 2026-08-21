@@ -310,6 +310,9 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Program" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
 
   /programs/{programId}/appearance-upload-url:
     parameters:
@@ -1010,10 +1013,18 @@ components:
 
     ProgramAppearance:
       type: object
+      description: >
+        Card look. `color` is the pass background colour and is always meaningful: Google
+        Wallet does NOT derive a background from the hero image (it falls back to its own
+        default), so a merchant that wants a specific colour must set one even when an
+        image is used. `backgroundStorageKey` is the hero image drawn ON that colour — the
+        two combine rather than compete, and a transparent PNG lets the colour show
+        through. Empty string clears a field (writes NULL); omitting a field on PATCH
+        leaves it unchanged. The icon is independent of both.
       properties:
-        color: { type: string, description: Hex accent color. }
-        iconStorageKey: { type: string, description: 512x512 PNG. }
-        backgroundStorageKey: { type: string, description: 1032x336 JPG. }
+        color: { type: string, description: "Hex background colour of the pass. Empty string clears it. Combines with backgroundStorageKey." }
+        iconStorageKey: { type: string, description: "Pass logo. PNG, 660x660 minimum, 1:1 (Google Wallet logo spec). Empty string clears it." }
+        backgroundStorageKey: { type: string, description: "Pass hero image, drawn over the background colour. PNG recommended (a transparent PNG lets the colour show through), 1032x812, ~5:4 — near-square, no embedded text, 20dp breathing room top and bottom (Google Wallet hero-image spec). JPEG accepted. Empty string clears it." }
         iconUrl: { type: string, description: Public URL for the icon (read-only). }
         backgroundUrl: { type: string, description: Public URL for the background (read-only). }
       additionalProperties: false

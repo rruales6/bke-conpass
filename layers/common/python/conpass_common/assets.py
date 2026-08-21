@@ -1,6 +1,9 @@
 """Program image assets on S3 (public-read).
 
-Merchants personalize a program's icon (512x512 PNG) and background (1032x336 JPG).
+Merchants personalize a program's icon and background image. Both follow Google Wallet's
+image spec, since they land on the pass: the icon is the `logo` (PNG, 660x660 min, 1:1) and
+the background is the `heroImage` (PNG preferred — a transparent one lets the pass
+background show through — 1032x812, ~5:4; JPEG is accepted too).
 The browser uploads the file directly to S3 via a short-lived presigned PUT URL (no
 image bytes flow through the Lambda), then persists the returned storage key through
 PATCH /programs. The public URL is used on the in-app card preview and on the Google
@@ -37,8 +40,8 @@ def public_asset_url(storage_key: str | None) -> str | None:
 def presign_upload(*, program_id: str, kind: str, content_type: str) -> dict:
     """Return a presigned S3 PUT target for a program asset.
 
-    Keyed `programs/<programId>/<kind>-<uuid>.<ext>` — the uuid means a re-upload never
-    collides with (or requires deleting) the previous asset.
+    Keyed `p/<programId[:8]>/<kind initial><10 hex>.<ext>` — a fresh token per upload, so
+    a re-upload never collides with (or requires deleting) the previous asset.
     """
     bucket = settings.program_assets_bucket
     if not bucket:
@@ -48,7 +51,12 @@ def presign_upload(*, program_id: str, kind: str, content_type: str) -> dict:
     if ext is None:
         raise ValueError(f"unsupported content type: {content_type}")
 
-    storage_key = f"programs/{program_id}/{kind}-{uuid.uuid4().hex}.{ext}"
+    # Deliberately terse: this URL is embedded in the "Add to Google Wallet" JWT, which
+    # has to stay inside an 1800-character URL, and the old
+    # `programs/<uuid>/<kind>-<32 hex>.<ext>` form spent ~85 characters per image.
+    # Still collision-free (a fresh token per upload), so re-uploading never clobbers the
+    # previous asset. Existing long keys keep working — the full key is what we store.
+    storage_key = f"p/{program_id[:8]}/{kind[0]}{uuid.uuid4().hex[:10]}.{ext}"
     return _presign_put(bucket, storage_key, content_type) | {
         "storageKey": storage_key,
         "publicUrl": public_asset_url(storage_key),

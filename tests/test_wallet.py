@@ -65,22 +65,36 @@ def test_object_payload_maps_stamps_and_appearance(provider):
     assert obj["state"] == "ACTIVE"
     assert obj["barcode"] == {"type": "QR_CODE", "value": "TOK-abc"}
     assert obj["hexBackgroundColor"] == "#0EA5E9"
+    # The tracked balance is the pass TITLE — textModulesData only shows once the holder
+    # expands the pass, which is too late for "how many stamps do I have".
+    assert obj["header"]["defaultValue"]["value"] == "3 / 8 sellos"
+    assert obj["subheader"]["defaultValue"]["value"] == "Café"
     mods = {m["id"]: m["body"] for m in obj["textModulesData"]}
-    assert mods["balance"] == "3 / 8"
     assert mods["reward"] == "Café gratis"
+    assert "balance" not in mods  # not duplicated in the details section
+
+
+def test_object_payload_status_line_without_a_target(provider):
+    obj = provider._object_payload(_content(stamps=3, stamps_for_reward=None))
+    assert obj["header"]["defaultValue"]["value"] == "3 sellos"
 
 
 def test_object_payload_points_and_membership(provider):
     pts = provider._object_payload(_content(
         program_type="loyalty_points", points=120, points_for_reward=200,
         stamps=0, stamps_for_reward=None))
-    assert {m["id"]: m["body"] for m in pts["textModulesData"]}["balance"] == "120 / 200"
+    assert pts["header"]["defaultValue"]["value"] == "120 / 200 puntos"
 
     mem = provider._object_payload(_content(
         program_type="membership_pass", membership_active_until="2026-12-31",
         reward_text=None))
+    assert mem["header"]["defaultValue"]["value"] == "Activa hasta 2026-12-31"
     mods = {m["id"]: m["body"] for m in mem["textModulesData"]}
     assert mods["validity"] == "2026-12-31"
+
+    open_ended = provider._object_payload(_content(
+        program_type="membership_pass", membership_active_until=None, reward_text=None))
+    assert open_ended["header"]["defaultValue"]["value"] == "Membresía activa"
 
 
 def test_invalid_hex_color_is_dropped(provider):
@@ -101,6 +115,58 @@ def test_object_payload_omits_images_when_absent(provider):
     assert "logo" not in obj and "heroImage" not in obj
 
 
+def test_object_payload_sends_background_color_alongside_hero_image(provider):
+    # Google Wallet does NOT derive a pass background from the hero image — it falls back
+    # to its own default — so a program that has both must send both: the colour paints
+    # the pass, the hero image sits on it.
+    obj = provider._object_payload(_content(
+        accent_color="#112233", background_url="https://cdn.example/bg.jpg"))
+    assert obj["hexBackgroundColor"] == "#112233"
+    assert obj["heroImage"]["sourceUri"]["uri"] == "https://cdn.example/bg.jpg"
+
+
+def test_object_payload_omits_background_color_when_unset(provider):
+    # Only when the merchant set no colour at all — then Google uses its own default.
+    obj = provider._object_payload(_content(
+        accent_color=None, background_url="https://cdn.example/bg.jpg"))
+    assert "hexBackgroundColor" not in obj
+
+
+def test_update_replaces_the_whole_object(provider, monkeypatch):
+    """update() must PUT, not PATCH: an appearance edit has to reach an installed pass,
+    and only a full replace can clear an image the merchant removed."""
+    calls: list[tuple[str, str, dict]] = []
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+    class _Api:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def put(self, url, json):
+            calls.append(("put", url, json))
+            return _Resp()
+
+        def patch(self, url, json):  # pragma: no cover - must not be used
+            calls.append(("patch", url, json))
+            return _Resp()
+
+    monkeypatch.setattr(provider, "_api", lambda: _Api())
+    provider.update(_content(stamps=7, accent_color="#0EA5E9"))
+
+    assert len(calls) == 1
+    verb, url, body = calls[0]
+    assert verb == "put"
+    assert url == f"/genericObject/{ISSUER}.card_{CARD1}"
+    assert body["header"]["defaultValue"]["value"] == "7 / 8 sellos"
+    assert body["hexBackgroundColor"] == "#0EA5E9"  # appearance travels with the update
+
+
 def test_public_asset_url_resolves_key(monkeypatch):
     import conpass_common.assets as assets
     monkeypatch.setattr(type(assets.settings), "program_assets_base_url",
@@ -117,14 +183,58 @@ def test_public_asset_url_none_when_unconfigured(monkeypatch):
     assert assets.public_asset_url("programs/p1/icon-x.png") is None
 
 
-def test_save_link_is_signed_savetowallet_jwt(provider):
-    link = provider._save_link(f"{ISSUER}.card_{CARD1}")
+def test_save_link_embeds_the_full_object(provider):
+    """The JWT must carry the whole genericObject, not just its id: the link has to be
+    able to create the pass on its own when the REST pre-creation didn't happen."""
+    link = provider._save_link(_content())
     assert link.startswith("https://pay.google.com/gp/v/save/")
     token = link.rsplit("/", 1)[1]
     claims = jwt.decode(token, options={"verify_signature": False})
     assert claims["typ"] == "savetowallet"
     assert claims["aud"] == "google"
-    assert claims["payload"]["genericObjects"][0]["id"] == f"{ISSUER}.card_{CARD1}"
+    # No `origins`: it only matters to the JS button API and costs ~200 encoded chars
+    # of a budget that has to fit the whole object into an 1800-character URL.
+    assert "origins" not in claims
+
+    obj = claims["payload"]["genericObjects"][0]
+    assert obj["id"] == f"{ISSUER}.card_{CARD1}"
+    assert obj["classId"] == f"{ISSUER}.program_{P1}"
+    assert obj["state"] == "ACTIVE"
+    assert obj["barcode"] == {"type": "QR_CODE", "value": "TOK-abc"}
+    assert obj["header"]["defaultValue"]["value"] == "3 / 8 sellos"
+    assert obj["cardTitle"]["defaultValue"]["value"] == "Conpass QA"
+    assert obj["hexBackgroundColor"] == "#0EA5E9"
+    # identical to what the REST call would have created — one payload builder, no drift
+    assert obj == provider._object_payload(_content())
+
+
+def test_save_link_without_images_embeds_and_fits(provider):
+    link = provider._save_link(_content())
+    from conpass_common.providers.google_wallet import SAVE_LINK_MAX_URL
+    assert len(link) <= SAVE_LINK_MAX_URL
+    claims = jwt.decode(link.rsplit("/", 1)[1], options={"verify_signature": False})
+    assert claims["payload"]["genericObjects"][0]["barcode"]["value"] == "TOK-abc"
+
+
+def test_oversized_link_falls_back_to_referencing_the_created_object(provider):
+    """Google: over 1800 chars "the save may not work due to truncation by web browsers".
+    With logo + hero image the embedded object blows that, so a pass we know exists is
+    referenced by id instead."""
+    big = _content(
+        logo_url="https://conpass-program-assets-prod.s3.us-east-1.amazonaws.com/"
+                 "programs/aafe1128-8e59-4f5a-a8f8-7e589edd21d6/icon-"
+                 "fad429da43164293b39a61362009aef2.png",
+        background_url="https://conpass-program-assets-prod.s3.us-east-1.amazonaws.com/"
+                       "programs/aafe1128-8e59-4f5a-a8f8-7e589edd21d6/background-"
+                       "fad429da43164293b39a61362009aef2.jpg")
+    from conpass_common.providers.google_wallet import SAVE_LINK_MAX_URL
+    assert len(provider._save_link(big)) > SAVE_LINK_MAX_URL  # self-contained, oversized
+
+    link = provider._save_link(big, object_exists=True)
+    assert len(link) <= SAVE_LINK_MAX_URL
+    obj = jwt.decode(link.rsplit("/", 1)[1],
+                     options={"verify_signature": False})["payload"]["genericObjects"][0]
+    assert obj == {"id": f"{ISSUER}.card_{CARD1}"}
 
 
 def test_not_configured_when_secret_absent(monkeypatch):

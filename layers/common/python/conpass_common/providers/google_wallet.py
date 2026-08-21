@@ -13,6 +13,7 @@ no Lambda pays for `google-auth`.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 
@@ -30,6 +31,12 @@ _TOKEN_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 _HEX_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _HTTP_TIMEOUT = 10.0
 _LANG = "es"  # Ecuador-first; providers render a single default locale.
+# A save link is handed to a browser as a URL, so the signed JWT has to stay addressable.
+# Google's guidance for the URL form is ~1800 characters; past that the button should use
+# the JS API instead. We log rather than truncate — a shortened pass would be worse.
+SAVE_LINK_MAX_URL = 1800
+
+log = logging.getLogger(__name__)
 
 
 def _loc(value: str) -> dict:
@@ -111,23 +118,39 @@ class GoogleWalletProvider(WalletProvider):
             "multipleDevicesAndHoldersAllowedStatus": "ONE_USER_ALL_DEVICES",
         }
 
-    def _text_modules(self, content: PassContent) -> list[dict]:
-        mods: list[dict] = []
+    def _status_line(self, content: PassContent) -> str:
+        """The card's tracked status, worded for the pass's most prominent line.
+
+        Google renders `header` as the pass title and only shows `textModulesData` once
+        the holder expands the details, so the balance goes in `header` — the whole point
+        of the pass is seeing "how many stamps do I have" at a glance.
+        """
         if content.program_type == "loyalty_stamps":
             total = content.stamps_for_reward
-            body = f"{content.stamps}" + (f" / {total}" if total else "")
-            mods.append({"id": "balance", "header": "Sellos", "body": body})
-        elif content.program_type == "loyalty_points":
+            return (f"{content.stamps} / {total} sellos" if total
+                    else f"{content.stamps} sellos")
+        if content.program_type == "loyalty_points":
             total = content.points_for_reward
-            body = f"{content.points}" + (f" / {total}" if total else "")
-            mods.append({"id": "balance", "header": "Puntos", "body": body})
-        elif content.program_type == "membership_pass" and content.membership_active_until:
+            return (f"{content.points} / {total} puntos" if total
+                    else f"{content.points} puntos")
+        if content.program_type == "membership_pass":
+            return (f"Activa hasta {content.membership_active_until}"
+                    if content.membership_active_until else "Membresía activa")
+        return content.program_name
+
+    def _text_modules(self, content: PassContent) -> list[dict]:
+        """The details section, below the barcode. The balance is NOT repeated here —
+        it is the pass title (see `_status_line`)."""
+        mods: list[dict] = []
+        if content.holder_name:
+            mods.append({"id": "holder", "header": "Titular", "body": content.holder_name})
+        if content.reward_text:
+            mods.append({"id": "reward", "header": "Premio", "body": content.reward_text})
+        if content.program_type == "membership_pass" and content.membership_active_until:
             mods.append(
                 {"id": "validity", "header": "Válida hasta",
                  "body": content.membership_active_until}
             )
-        if content.reward_text:
-            mods.append({"id": "reward", "header": "Premio", "body": content.reward_text})
         return mods
 
     def _object_payload(self, content: PassContent) -> dict:
@@ -136,25 +159,23 @@ class GoogleWalletProvider(WalletProvider):
             "classId": self._class_id(content),
             "state": "ACTIVE",
             "cardTitle": _loc(content.merchant_name),
-            "header": _loc(content.program_name),
+            # subheader is the small label above the title; header is the title itself —
+            # so the programme names the card and the tracked balance is what stands out.
+            "subheader": _loc(content.program_name),
+            "header": _loc(self._status_line(content)),
             "barcode": {"type": "QR_CODE", "value": content.opaque_token},
             "textModulesData": self._text_modules(content),
         }
-        if content.holder_name:
-            obj["subheader"] = _loc(content.holder_name)
         if content.accent_color and _HEX_RE.match(content.accent_color):
             obj["hexBackgroundColor"] = content.accent_color
+        # No contentDescription on either image: it costs ~200 characters of encoded
+        # JWT, and the save link has to carry this whole object inside an 1800-character
+        # URL. cardTitle/header already say the same thing in text.
         if content.logo_url:
-            obj["logo"] = {
-                "sourceUri": {"uri": content.logo_url},
-                "contentDescription": _loc(content.merchant_name),
-            }
+            obj["logo"] = {"sourceUri": {"uri": content.logo_url}}
         if content.background_url:
             # Banner across the front of the pass (GenericObject.heroImage).
-            obj["heroImage"] = {
-                "sourceUri": {"uri": content.background_url},
-                "contentDescription": _loc(content.program_name),
-            }
+            obj["heroImage"] = {"sourceUri": {"uri": content.background_url}}
         return obj
 
     # --- WalletProvider interface -------------------------------------------
@@ -171,16 +192,23 @@ class GoogleWalletProvider(WalletProvider):
                 api.put(f"/genericObject/{object_id}", json=obj).raise_for_status()
         return IssuedPass(
             provider=WalletKind.GOOGLE,
-            add_link=self._save_link(object_id),
+            add_link=self._save_link(content, object_exists=True),
             provider_object_id=object_id,
             provider_class_id=obj["classId"],
         )
 
     def update(self, content: PassContent) -> None:
+        """Push the pass's full backend-authoritative state.
+
+        A PUT (full replace), not a partial patch: appearance changes have to reach an
+        already-installed pass too, and only a replace can *clear* an image the merchant
+        removed — a PATCH leaves omitted fields alone. The payload is derived entirely
+        from the DB rows, so replacing is the same operation `issue` performs on an
+        object that already exists.
+        """
         obj = self._object_payload(content)
-        patch = {"textModulesData": obj["textModulesData"], "state": obj["state"]}
         with self._api() as api:
-            api.patch(f"/genericObject/{obj['id']}", json=patch).raise_for_status()
+            api.put(f"/genericObject/{obj['id']}", json=obj).raise_for_status()
 
     def revoke(self, provider_object_id: str) -> None:
         with self._api() as api:
@@ -189,9 +217,20 @@ class GoogleWalletProvider(WalletProvider):
             ).raise_for_status()
 
     def add_link(self, content: PassContent) -> str:
-        # No state mutation: reference the (already-issued) object by id.
-        self._credentials()
-        return self._save_link(self._object_id(content))
+        """Regenerate the link without mutating anything (this serves a GET).
+
+        The existence probe is a read, so the endpoint stays side-effect-free; it only
+        decides whether the compact id-reference form is safe to use.
+        """
+        exists = False
+        try:
+            with self._api() as api:
+                exists = api.get(
+                    f"/genericObject/{self._object_id(content)}").status_code == 200
+        except Exception:  # noqa: BLE001 - fall back to the self-contained link
+            log.warning("could not probe the wallet object for card %s",
+                        content.card_id, exc_info=True)
+        return self._save_link(content, object_exists=exists)
 
     # --- internals ----------------------------------------------------------
     def _ensure_class(self, api: httpx.Client, content: PassContent) -> None:
@@ -202,14 +241,56 @@ class GoogleWalletProvider(WalletProvider):
         else:
             found.raise_for_status()
 
-    def _save_link(self, object_id: str) -> str:
-        sa = self._credentials()
+    def _encode_save_jwt(self, sa: dict, payload: dict, origins: bool = True) -> str:
         claims = {
             "iss": sa["client_email"],
             "aud": "google",
             "typ": "savetowallet",
             "iat": int(time.time()),
-            "payload": {"genericObjects": [{"id": object_id}]},
+            "payload": payload,
         }
-        token = jwt.encode(claims, sa["private_key"], algorithm="RS256")
-        return SAVE_LINK_BASE + token
+        if origins:
+            # Sites allowed to render the button for this token.
+            claims["origins"] = settings.cors_origins
+        return SAVE_LINK_BASE + jwt.encode(claims, sa["private_key"], algorithm="RS256")
+
+    def _save_link(self, content: PassContent, *, object_exists: bool = False) -> str:
+        """Signed "Add to Google Wallet" link.
+
+        The JWT carries the FULL object definition, per Google's web guide, so the link
+        can create the pass by itself — it does not depend on the REST pre-creation in
+        `issue`, which is best-effort and must never block enrollment.
+
+        The catch is size: Google states "the safe length of an encoded JWT is 1800
+        characters… over 1800 characters, the save may not work due to truncation by web
+        browsers", and our object exceeds that once a programme carries logo + hero image
+        (their S3 URLs alone are ~130 characters each). So when the embedded form would
+        be too long we fall back to Google's documented mitigation — reference the
+        already-created object by id, which encodes in a few hundred characters. That
+        fallback is only safe when the object really exists, hence `object_exists`;
+        without that assurance an over-long embedded link still beats a short link
+        pointing at nothing.
+        """
+        sa = self._credentials()
+        obj = self._object_payload(content)
+        # `origins` costs ~200 encoded characters and only matters to the JS button
+        # API; the URL form does not need it, and the budget is better spent on content.
+        link = self._encode_save_jwt(sa, {"genericObjects": [obj]}, origins=False)
+        if len(link) <= SAVE_LINK_MAX_URL:
+            return link
+
+        if object_exists:
+            short = self._encode_save_jwt(
+                sa, {"genericObjects": [{"id": obj["id"]}]}, origins=False)
+            log.info(
+                "save link for card %s embedded %d chars (>%d); referencing the "
+                "pre-created object instead (%d chars)",
+                content.card_id, len(link), SAVE_LINK_MAX_URL, len(short))
+            return short
+
+        log.warning(
+            "save link for card %s is %d chars (>%d) and the object is not known to "
+            "exist, so it must stay self-contained — the URL may be truncated by the "
+            "browser. Shorten the asset URLs to bring it under the limit.",
+            content.card_id, len(link), SAVE_LINK_MAX_URL)
+        return link
