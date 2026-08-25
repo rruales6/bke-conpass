@@ -313,6 +313,11 @@ class _FakePushRepo(_FakeProgramsCrudRepo):
     def get_merchant(self, merchant_id):
         return {"id": merchant_id, "business_name": "Café Vecino"}
 
+    def get_customers_by_ids(self, customer_ids):
+        # None of these cards carry a customer_id (Phase 12 test coverage for the
+        # batch fetch itself lives in test_phase12_wallet_enrichment.py).
+        return {}
+
 
 def _seed_push(monkeypatch, program, cards):
     import services.programs.handler as h
@@ -323,6 +328,9 @@ def _seed_push(monkeypatch, program, cards):
     class _Provider:
         def update(self, content):
             pushed.append(content.card_id)
+
+        def sync_program(self, content):
+            pass
 
     monkeypatch.setattr(h, "get_wallet_provider", lambda: _Provider())
     return h, repo, pushed

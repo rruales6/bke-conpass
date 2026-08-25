@@ -26,6 +26,7 @@ def _card_model(c: dict) -> dict:
             "membershipActiveUntil": c.get("membership_active_until"),
         },
         "holderName": c.get("holder_name"),
+        "language": c.get("language", "es"),
         "active": c.get("active", True),
         "walletInstalled": c.get("wallet_installed", False),
         "createdAt": c["created_at"],
@@ -58,8 +59,14 @@ def get_wallet_links(card_id: str, identity: CurrentIdentity):
         raise NotFound("program not found")
     merchants = client.table("merchants").select("*").eq(
         "id", card["merchant_id"]).execute().data
+    customer = None
+    if card.get("customer_id"):
+        customers = client.table("customers").select("*").eq(
+            "id", card["customer_id"]).execute().data
+        customer = customers[0] if customers else None
 
-    content = build_pass_content(card, programs[0], merchants[0] if merchants else None)
+    content = build_pass_content(card, programs[0], merchants[0] if merchants else None,
+                                 customer)
     return {"google": get_wallet_provider().add_link(content)}
 
 

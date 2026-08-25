@@ -51,7 +51,8 @@ def _content(**over) -> PassContent:
         card_id=CARD1, program_id=P1, merchant_id=M1,
         program_type="loyalty_stamps", program_name="Café", merchant_name="Conpass QA",
         holder_name="Juan R.", opaque_token="TOK-abc", stamps=3, stamps_for_reward=8,
-        reward_text="Café gratis", accent_color="#0EA5E9",
+        rewards_available=1, reward_text="Café gratis", accent_color="#0EA5E9",
+        member_email="maria@example.com",
     )
     base.update(over)
     return PassContent(**base)
@@ -65,36 +66,152 @@ def test_object_payload_maps_stamps_and_appearance(provider):
     assert obj["state"] == "ACTIVE"
     assert obj["barcode"] == {"type": "QR_CODE", "value": "TOK-abc"}
     assert obj["hexBackgroundColor"] == "#0EA5E9"
-    # The tracked balance is the pass TITLE — textModulesData only shows once the holder
-    # expands the pass, which is too late for "how many stamps do I have".
-    assert obj["header"]["defaultValue"]["value"] == "3 / 8 sellos"
-    assert obj["subheader"]["defaultValue"]["value"] == "Café"
-    mods = {m["id"]: m["body"] for m in obj["textModulesData"]}
-    assert mods["reward"] == "Café gratis"
-    assert "balance" not in mods  # not duplicated in the details section
+    # The card names itself in the kicker and the programme is the title; the balance is
+    # no longer squeezed into the title because it has its own card-front row now (D14).
+    assert obj["subheader"]["defaultValue"]["value"] == "Tarjeta de lealtad"
+    assert obj["header"]["defaultValue"]["value"] == "Café"
+    mods = {m["id"]: (m["header"], m["body"]) for m in obj["textModulesData"]}
+    assert mods["hdr0"] == ("SELLOS", "●●●○○○○○")
+    assert mods["hdr1"] == ("PROGRESO", "3 / 8")   # the figure, for reading at a glance
+    assert mods["hdr2"] == ("PREMIOS", "1")
+    assert mods["sec0"] == ("RECOMPENSA", "Café gratis")
+    assert mods["sec1"] == ("MIEMBRO", "Juan R.")
+    assert mods["sec2"] == ("CORREO", "maria@example.com")
 
 
-def test_object_payload_status_line_without_a_target(provider):
-    obj = provider._object_payload(_content(stamps=3, stamps_for_reward=None))
-    assert obj["header"]["defaultValue"]["value"] == "3 sellos"
+def test_stamp_row_without_a_target(provider):
+    """No target means no progress to draw — the count stands alone and the goal cell,
+    which the template still references, says so rather than rendering blank."""
+    mods = {m["id"]: (m["header"], m["body"])
+            for m in provider._object_payload(
+                _content(stamps=3, stamps_for_reward=None))["textModulesData"]}
+    assert mods["hdr0"] == ("SELLOS", "3")
+    assert mods["hdr1"] == ("META", "—")
+
+
+def test_stamp_strip_collapses_when_the_target_is_too_large(provider):
+    """Past a dozen the dots blur together, so the strip gives way to the figures."""
+    from conpass_common.providers.google_wallet import MAX_STAMP_DOTS
+    mods = {m["id"]: m["body"] for m in provider._object_payload(
+        _content(stamps=5, stamps_for_reward=MAX_STAMP_DOTS + 1))["textModulesData"]}
+    assert mods["hdr0"] == "5"
+    assert mods["hdr1"] == str(MAX_STAMP_DOTS + 1)
+
+
+def test_missing_card_level_values_render_a_placeholder(provider):
+    """Name and email are per-CARD, so the class template cannot drop their cells for an
+    anonymous enrollment — the object fills them instead of leaving them blank."""
+    mods = {m["id"]: m["body"] for m in provider._object_payload(
+        _content(holder_name=None, member_email=None))["textModulesData"]}
+    assert mods["sec1"] == "—" and mods["sec2"] == "—"
 
 
 def test_object_payload_points_and_membership(provider):
-    pts = provider._object_payload(_content(
+    pts = {m["id"]: (m["header"], m["body"]) for m in provider._object_payload(_content(
         program_type="loyalty_points", points=120, points_for_reward=200,
-        stamps=0, stamps_for_reward=None))
-    assert pts["header"]["defaultValue"]["value"] == "120 / 200 puntos"
+        stamps=0, stamps_for_reward=None))["textModulesData"]}
+    assert pts["hdr0"] == ("PUNTOS", "120")
+    assert pts["hdr1"] == ("META", "200")
+    assert pts["hdr2"] == ("PREMIOS", "1")
 
-    mem = provider._object_payload(_content(
+    mem_obj = provider._object_payload(_content(
         program_type="membership_pass", membership_active_until="2026-12-31",
-        reward_text=None))
-    assert mem["header"]["defaultValue"]["value"] == "Activa hasta 2026-12-31"
-    mods = {m["id"]: m["body"] for m in mem["textModulesData"]}
-    assert mods["validity"] == "2026-12-31"
+        membership_includes="Acceso al gimnasio", reward_text=None))
+    assert mem_obj["subheader"]["defaultValue"]["value"] == "Pase de membresía"
+    mem = {m["id"]: (m["header"], m["body"]) for m in mem_obj["textModulesData"]}
+    assert mem["hdr0"] == ("ESTADO", "Activa")
+    assert mem["hdr1"] == ("VÁLIDA HASTA", "2026-12-31")
+    assert mem["hdr2"] == ("INCLUYE", "Acceso al gimnasio")
 
-    open_ended = provider._object_payload(_content(
-        program_type="membership_pass", membership_active_until=None, reward_text=None))
-    assert open_ended["header"]["defaultValue"]["value"] == "Membresía activa"
+    open_ended = {m["id"]: m["body"] for m in provider._object_payload(_content(
+        program_type="membership_pass", membership_active_until=None,
+        reward_text=None))["textModulesData"]}
+    assert open_ended["hdr1"] == "Sin caducidad"
+
+
+def test_labels_follow_the_card_language(provider):
+    """The language the customer had selected when they enrolled (D16), not the device's."""
+    obj = provider._object_payload(_content(language="en"))
+    assert obj["subheader"]["defaultValue"]["value"] == "Stamp card"
+    assert obj["header"]["defaultValue"]["language"] == "en"
+    mods = {m["id"]: m["header"] for m in obj["textModulesData"]}
+    assert mods["hdr0"] == "STAMPS" and mods["hdr1"] == "PROGRESS"
+    assert mods["sec0"] == "PROGRAM REWARD" and mods["sec2"] == "EMAIL"
+    # Anything unrecognised lands on Ecuador-first Spanish rather than empty labels.
+    assert provider._object_payload(
+        _content(language="pt-BR"))["subheader"]["defaultValue"]["value"] == "Tarjeta de lealtad"
+
+
+# --- the card-front template (class-level) ----------------------------------
+def _paths(row: dict) -> list[str]:
+    kind, items = next(iter(row.items()))
+    order = {"oneItem": ["item"], "twoItems": ["startItem", "endItem"],
+             "threeItems": ["startItem", "middleItem", "endItem"]}[kind]
+    return [items[k]["firstValue"]["fields"][0]["fieldPath"] for k in order]
+
+
+def test_class_template_draws_the_rows_on_the_card_front(provider):
+    rows = (provider._class_payload(_content())
+            ["classTemplateInfo"]["cardTemplateOverride"]["cardRowTemplateInfos"])
+    assert [list(r)[0] for r in rows] == ["threeItems", "oneItem", "twoItems"]
+    assert _paths(rows[0]) == [f"object.textModulesData['hdr{i}']" for i in range(3)]
+    assert _paths(rows[1]) == ["object.textModulesData['sec0']"]
+    assert _paths(rows[2]) == ["object.textModulesData['sec1']",
+                               "object.textModulesData['sec2']"]
+
+
+def test_class_template_drops_the_reward_row_when_the_program_has_none(provider):
+    """Row shape is a PROGRAM decision, so a reward-less program simply has no such row —
+    unlike the per-card cells, which cannot vary by class."""
+    rows = (provider._class_payload(_content(reward_text=None))
+            ["classTemplateInfo"]["cardTemplateOverride"]["cardRowTemplateInfos"])
+    assert [list(r)[0] for r in rows] == ["threeItems", "twoItems"]
+    assert _paths(rows[1]) == ["object.textModulesData['sec1']",
+                               "object.textModulesData['sec2']"]
+
+
+def test_ensure_class_updates_a_class_that_already_exists(provider, monkeypatch):
+    """Create-only would strand every program whose class predates this layout — the
+    card-front template is a class field, so it would keep rendering the old pass."""
+    calls: list[tuple[str, str]] = []
+
+    class _Resp:
+        def __init__(self, code=200):
+            self.status_code = code
+
+        def raise_for_status(self):
+            return None
+
+    class _Api:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get(self, url):
+            calls.append(("get", url))
+            return _Resp(self.code)
+
+        def post(self, url, json):
+            calls.append(("post", url))
+            return _Resp()
+
+        def put(self, url, json):
+            calls.append(("put", url))
+            return _Resp()
+
+    class_url = f"/genericClass/{ISSUER}.program_{P1}"
+
+    _Api.code = 200
+    monkeypatch.setattr(provider, "_api", lambda: _Api())
+    provider.sync_program(_content())
+    assert calls == [("get", class_url), ("put", class_url)]
+
+    calls.clear()
+    _Api.code = 404
+    provider.sync_program(_content())
+    assert calls == [("get", class_url), ("post", "/genericClass")]
 
 
 def test_invalid_hex_color_is_dropped(provider):
@@ -163,7 +280,8 @@ def test_update_replaces_the_whole_object(provider, monkeypatch):
     verb, url, body = calls[0]
     assert verb == "put"
     assert url == f"/genericObject/{ISSUER}.card_{CARD1}"
-    assert body["header"]["defaultValue"]["value"] == "7 / 8 sellos"
+    mods = {m["id"]: m["body"] for m in body["textModulesData"]}
+    assert mods["hdr0"] == "●●●●●●●○" and mods["hdr1"] == "7 / 8"
     assert body["hexBackgroundColor"] == "#0EA5E9"  # appearance travels with the update
 
 
@@ -201,7 +319,7 @@ def test_save_link_embeds_the_full_object(provider):
     assert obj["classId"] == f"{ISSUER}.program_{P1}"
     assert obj["state"] == "ACTIVE"
     assert obj["barcode"] == {"type": "QR_CODE", "value": "TOK-abc"}
-    assert obj["header"]["defaultValue"]["value"] == "3 / 8 sellos"
+    assert obj["header"]["defaultValue"]["value"] == "Café"
     assert obj["cardTitle"]["defaultValue"]["value"] == "Conpass QA"
     assert obj["hexBackgroundColor"] == "#0EA5E9"
     # identical to what the REST call would have created — one payload builder, no drift
@@ -216,10 +334,10 @@ def test_save_link_without_images_embeds_and_fits(provider):
     assert claims["payload"]["genericObjects"][0]["barcode"]["value"] == "TOK-abc"
 
 
-def test_oversized_link_falls_back_to_referencing_the_created_object(provider):
+def test_link_references_the_object_whenever_it_is_known_to_exist(provider):
     """Google: over 1800 chars "the save may not work due to truncation by web browsers".
-    With logo + hero image the embedded object blows that, so a pass we know exists is
-    referenced by id instead."""
+    A pass carrying images and the card-front rows is past that, so referencing an object
+    we know exists is the PRIMARY path — that is what frees the layout to grow (D13)."""
     big = _content(
         logo_url="https://conpass-program-assets-prod.s3.us-east-1.amazonaws.com/"
                  "programs/aafe1128-8e59-4f5a-a8f8-7e589edd21d6/icon-"
@@ -231,6 +349,10 @@ def test_oversized_link_falls_back_to_referencing_the_created_object(provider):
     assert len(provider._save_link(big)) > SAVE_LINK_MAX_URL  # self-contained, oversized
 
     link = provider._save_link(big, object_exists=True)
+    # …and the compact form is used even when the embedded one would have fitted.
+    assert jwt.decode(provider._save_link(_content(), object_exists=True).rsplit("/", 1)[1],
+                      options={"verify_signature": False}
+                      )["payload"]["genericObjects"][0] == {"id": f"{ISSUER}.card_{CARD1}"}
     assert len(link) <= SAVE_LINK_MAX_URL
     obj = jwt.decode(link.rsplit("/", 1)[1],
                      options={"verify_signature": False})["payload"]["genericObjects"][0]

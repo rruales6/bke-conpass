@@ -1105,6 +1105,15 @@ components:
         dedupeKey:
           type: string
           description: Optional client key to dedupe repeat submissions from the same device.
+        language:
+          type: string
+          enum: [es, en]
+          description: >-
+            UI language the customer had selected when submitting the form; drives the
+            labels on their wallet pass. Omitted means Spanish. Deliberately carries no
+            OpenAPI `default`: datamodel-codegen emits one as a bare string rather than
+            an enum member, so every request model would fail its own enum on
+            serialization. The fallback lives in the handler instead.
       additionalProperties: false
 
     Card:
@@ -1119,6 +1128,7 @@ components:
         opaqueToken: { type: string, description: Opaque per-member id encoded in the QR. }
         balance: { $ref: "#/components/schemas/Balance" }
         holderName: { type: string, description: Display name (e.g. "María T."). }
+        language: { type: string, enum: [es, en] }
         active: { type: boolean }
         walletInstalled: { type: boolean, description: Drives the active-pass billing metric. }
         createdAt: { type: string, format: date-time }

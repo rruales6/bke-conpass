@@ -47,3 +47,12 @@ class ProgramsRepository:
         rows = self._c.table("merchants").select("*").eq(
             "id", merchant_id).execute().data
         return rows[0] if rows else None
+
+    def get_customers_by_ids(self, customer_ids: list[str]) -> dict[str, dict]:
+        """Batch-fetch customers for a wallet push — one query for up to
+        WALLET_PUSH_MAX_CARDS cards, not one query per card."""
+        if not customer_ids:
+            return {}
+        rows = self._c.table("customers").select("*").in_(
+            "id", customer_ids).execute().data
+        return {r["id"]: r for r in rows}

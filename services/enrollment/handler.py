@@ -14,7 +14,7 @@ from typing import Annotated
 from conpass_common import create_app, lambda_handler
 from conpass_common.errors import NotFound, ValidationFailed
 from conpass_common.idempotency import IdempotencyStore, StoredResponse, run_idempotent
-from conpass_common.models import EnrollmentRequest
+from conpass_common.models import EnrollmentRequest, Language
 from conpass_common.providers import get_wallet_provider
 from conpass_common.providers.wallet import build_pass_content
 from fastapi import Header
@@ -34,6 +34,13 @@ def get_repo() -> EnrollmentRepository:
 
 def get_idempotency_store() -> IdempotencyStore:
     return IdempotencyStore()
+
+
+def _language(value: Language | str | None) -> str:
+    """`language` defaults to a bare "es" string (pydantic does not validate a field's
+    default value into its enum), while an explicit choice round-trips as a `Language`
+    member — normalize both to the plain string the `cards.language` column stores."""
+    return value.value if isinstance(value, Language) else (value or "es")
 
 
 def _holder_name(full_name: str | None) -> str | None:
@@ -62,6 +69,7 @@ def _card_issued(card: dict, program: dict, wallet_links: dict | None = None) ->
                 "membershipActiveUntil": card.get("membership_active_until"),
             },
             "holderName": card.get("holder_name"),
+            "language": card.get("language", "es"),
             "active": card.get("active", True),
             "walletInstalled": card.get("wallet_installed", False),
             "createdAt": card["created_at"],
@@ -70,16 +78,18 @@ def _card_issued(card: dict, program: dict, wallet_links: dict | None = None) ->
     }
 
 
-def _wallet_links(repo: EnrollmentRepository, card: dict, program: dict, *,
-                  mutate: bool) -> dict:
+def _wallet_links(repo: EnrollmentRepository, card: dict, program: dict,
+                  customer: dict | None, *, mutate: bool) -> dict:
     """Best-effort "Add to Google Wallet" link. A wallet failure must never block
     enrollment (backend is authority), so any error degrades to no links. `mutate`
     issues/refreshes the pass object (new card); otherwise only re-mints the link
-    (dedupe replay), avoiding a redundant write.
+    (dedupe replay), avoiding a redundant write. `customer` supplies the pass's contact
+    line (email) — the caller passes the row it already has, or None if it's genuinely
+    unavailable, so this never needs its own read on the hot enrollment path.
     """
     try:
         merchant = repo.get_merchant(card["merchant_id"])
-        content = build_pass_content(card, program, merchant)
+        content = build_pass_content(card, program, merchant, customer)
         provider = get_wallet_provider()
         link = provider.issue(content).add_link if mutate else provider.add_link(content)
         return {"google": link}
@@ -108,7 +118,12 @@ def enroll_customer(
         if body.dedupeKey:
             existing = repo.find_card_by_dedupe(program_id, body.dedupeKey)
             if existing:
-                links = _wallet_links(repo, existing, program, mutate=False)
+                # Replay path: the customer wasn't just created, so fetch it (may be
+                # None for an old anonymous enrollment with no customer_id).
+                existing_customer = (repo.get_customer(existing["customer_id"])
+                                     if existing.get("customer_id") else None)
+                links = _wallet_links(repo, existing, program, existing_customer,
+                                      mutate=False)
                 return StoredResponse(200, _card_issued(existing, program, links))
 
         merchant_id = program["merchant_id"]
@@ -140,8 +155,9 @@ def enroll_customer(
             "holder_name": _holder_name(body.fullName),
             "membership_active_until": muntil,
             "dedupe_key": body.dedupeKey,
+            "language": _language(body.language),
         })
-        links = _wallet_links(repo, card, program, mutate=True)
+        links = _wallet_links(repo, card, program, customer, mutate=True)
         return StoredResponse(201, _card_issued(card, program, links))
 
     result = run_idempotent(get_idempotency_store(), key=idempotency_key,

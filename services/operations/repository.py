@@ -43,6 +43,7 @@ class OperationsRepository(Protocol):
     def get_card_row_by_token(self, token: str) -> dict | None: ...
     def get_program(self, program_id: str) -> dict | None: ...
     def get_merchant(self, merchant_id: str) -> dict | None: ...
+    def get_customer(self, customer_id: str) -> dict | None: ...
     # Redemptions report (Phase 6).
     def list_redemptions(self, program_id: str, from_: str | None,
                          to: str | None) -> list[dict]: ...
@@ -59,6 +60,7 @@ class InMemoryRepository:
     card_rows: dict[str, dict] = field(default_factory=dict)
     programs: dict[str, dict] = field(default_factory=dict)
     merchants: dict[str, dict] = field(default_factory=dict)
+    customers: dict[str, dict] = field(default_factory=dict)
     redemptions: list[dict] = field(default_factory=list)
 
     def get_card_row(self, card_id: str) -> dict | None:
@@ -73,6 +75,9 @@ class InMemoryRepository:
 
     def get_merchant(self, merchant_id: str) -> dict | None:
         return self.merchants.get(merchant_id)
+
+    def get_customer(self, customer_id: str) -> dict | None:
+        return self.customers.get(customer_id)
 
     def get_card(self, card_id: str) -> CardRow | None:
         return self.cards.get(card_id)
@@ -140,6 +145,11 @@ class SupabaseRepository:
 
     def get_merchant(self, merchant_id: str) -> dict | None:
         rows = self._c().table("merchants").select("*").eq("id", merchant_id).execute().data
+        return rows[0] if rows else None
+
+    def get_customer(self, customer_id: str) -> dict | None:
+        rows = self._c().table("customers").select("*").eq(
+            "id", customer_id).execute().data
         return rows[0] if rows else None
 
     def get_rules(self, program_id: str) -> ProgramRules | None:

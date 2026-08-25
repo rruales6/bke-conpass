@@ -13,6 +13,22 @@ from enum import StrEnum
 
 from ..assets import public_asset_url
 
+DEFAULT_LANGUAGE = "es"
+SUPPORTED_LANGUAGES = ("es", "en")
+
+
+def normalize_language(value: str | None) -> str:
+    """Coerce anything stored or sent to one of the languages a pass can render.
+
+    The pass has no fallback chain of its own — an unknown tag would render empty
+    labels — so everything funnels through here and lands on Ecuador-first Spanish.
+    """
+    tag = (value or "").strip().lower()
+    for lang in SUPPORTED_LANGUAGES:
+        if tag.startswith(lang):
+            return lang
+    return DEFAULT_LANGUAGE
+
 
 class WalletKind(StrEnum):
     GOOGLE = "google"
@@ -37,8 +53,15 @@ class PassContent:
     stamps_for_reward: int | None = None
     points: int = 0
     points_for_reward: int | None = None
+    rewards_available: int = 0
     reward_text: str | None = None
     membership_active_until: str | None = None
+    membership_includes: str | None = None
+    # Holder identity shown on the pass. The card's opaque token stays the QR and is
+    # never printed as text — a readable id would defeat the point of the token (B6).
+    member_email: str | None = None
+    # Label language, captured from the enrollment form (D16).
+    language: str = DEFAULT_LANGUAGE
     # Appearance:
     accent_color: str | None = None
     logo_url: str | None = None
@@ -75,13 +98,25 @@ class WalletProvider(ABC):
     def add_link(self, content: PassContent) -> str:
         """Return (or regenerate) the add-to-wallet link without mutating state."""
 
+    @abstractmethod
+    def sync_program(self, content: PassContent) -> None:
+        """Refresh the vendor's PROGRAM-level template from the program's own state.
 
-def build_pass_content(card: dict, program: dict, merchant: dict | None) -> PassContent:
-    """Map canonical DB rows (cards/programs/merchants) → a vendor-neutral PassContent.
+        Separate from `update` because it is per-program, not per-card: a program edit
+        calls this once and `update` once per installed card.
+        """
 
-    Shared by enrollment, cards and operations so the row→pass mapping lives in one
-    place. Balances come from the CARD (backend-authoritative); labels/appearance from
-    the PROGRAM; the issuer/holder name from the MERCHANT.
+
+def build_pass_content(
+    card: dict, program: dict, merchant: dict | None, customer: dict | None = None
+) -> PassContent:
+    """Map canonical DB rows (cards/programs/merchants/customers) → a vendor-neutral
+    PassContent.
+
+    Shared by enrollment, cards, operations and programs so the row→pass mapping lives in
+    one place. Balances come from the CARD (backend-authoritative); labels/appearance from
+    the PROGRAM; the issuer name from the MERCHANT; the contact line from the CUSTOMER,
+    which is optional — an anonymous enrollment stores no email (B6).
     """
     mu = card.get("membership_active_until")
     return PassContent(
@@ -97,8 +132,12 @@ def build_pass_content(card: dict, program: dict, merchant: dict | None) -> Pass
         stamps_for_reward=program.get("stamps_for_reward"),
         points=card.get("points") or 0,
         points_for_reward=program.get("points_for_reward"),
+        rewards_available=card.get("rewards_available") or 0,
         reward_text=program.get("reward"),
         membership_active_until=mu.isoformat() if hasattr(mu, "isoformat") else mu,
+        membership_includes=program.get("membership_includes"),
+        member_email=(customer or {}).get("email"),
+        language=normalize_language(card.get("language")),
         accent_color=program.get("color"),
         logo_url=public_asset_url(program.get("icon_storage_key")),
         background_url=public_asset_url(program.get("background_storage_key")),

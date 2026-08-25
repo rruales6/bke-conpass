@@ -147,7 +147,8 @@ def _push_wallet_update(repo: OperationsRepository, card_id: str) -> None:
         if program is None:
             return
         merchant = repo.get_merchant(card["merchant_id"])
-        get_wallet_provider().update(build_pass_content(card, program, merchant))
+        customer = repo.get_customer(card["customer_id"]) if card.get("customer_id") else None
+        get_wallet_provider().update(build_pass_content(card, program, merchant, customer))
     except Exception:  # noqa: BLE001 - wallet reflection is non-critical
         log.warning("wallet update failed for card %s", card_id, exc_info=True)
 

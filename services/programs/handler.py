@@ -24,8 +24,12 @@ ENROLL_BASE = "https://conpass.cards/enroll"
 WALLET_PUSH_MAX_CARDS = 40
 
 # Program columns that are mirrored onto the wallet pass.
+# membership_includes now renders as the membership pass's "includes" row (Phase 12) —
+# ProgramUpdate doesn't expose it for editing yet, so this entry is inert today, but it
+# keeps the allowlist correct for the day it does.
 _WALLET_VISIBLE = ("name", "color", "icon_storage_key", "background_storage_key",
-                   "stamps_for_reward", "points_for_reward", "reward")
+                   "stamps_for_reward", "points_for_reward", "reward",
+                   "membership_includes")
 
 app = create_app(service="programs")
 
@@ -198,9 +202,23 @@ def _push_appearance_to_passes(repo: ProgramsRepository, program: dict) -> None:
             return
         merchant = repo.get_merchant(str(program["merchant_id"]))
         provider = get_wallet_provider()
+        try:
+            # Class-level template (card-front row layout) lives once per program, not
+            # once per card — refresh it before touching any individual pass. Any one
+            # of the batch's cards works: the fields sync_program reads are all
+            # program/merchant-level, not per-card.
+            provider.sync_program(build_pass_content(cards[0], program, merchant))
+        except Exception:  # noqa: BLE001 - wallet reflection is non-critical
+            log.warning("wallet program sync failed for program %s",
+                        program.get("id"), exc_info=True)
+        # One query for every card's customer instead of one per card (up to
+        # WALLET_PUSH_MAX_CARDS queries) — this loop already runs inside a 15s Lambda.
+        customer_ids = [c["customer_id"] for c in cards if c.get("customer_id")]
+        customers = repo.get_customers_by_ids(customer_ids)
         for card in cards:
             try:
-                provider.update(build_pass_content(card, program, merchant))
+                customer = customers.get(card.get("customer_id"))
+                provider.update(build_pass_content(card, program, merchant, customer))
             except Exception:  # noqa: BLE001 - one bad pass must not stop the rest
                 log.warning("wallet appearance push failed for card %s",
                             card.get("id"), exc_info=True)
