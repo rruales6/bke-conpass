@@ -81,6 +81,43 @@ def test_accrue_requires_idempotency_key(monkeypatch):
     assert resp.status_code == 422  # missing Idempotency-Key
 
 
+def test_redeem_is_idempotent_and_echoes_rewards_redeemed(monkeypatch):
+    from services.operations.logic import CardState
+    from services.operations.repository import CardRow
+
+    h, repo = _seed_operations(monkeypatch)
+    # Give the card one reward available and a history of 3 prior redemptions.
+    repo.cards[CARD1] = CardRow(
+        id=CARD1, program_id=P1, merchant_id=M1, program_type="loyalty_stamps",
+        state=CardState(stamps=0, points=0, rewards_available=1, active=True,
+                        rewards_redeemed=3))
+
+    client = TestClient(h.app)
+    key = str(uuid.uuid4())
+    payload = {"cardId": CARD1, "operationUserId": OP1}
+    headers = {"Idempotency-Key": key}
+
+    r1 = client.post("/operations/redeem", json=payload, headers=headers)
+    r2 = client.post("/operations/redeem", json=payload, headers=headers)  # replay
+
+    assert r1.status_code == 200
+    body = r1.json()
+    assert body["card"]["balance"]["rewardsAvailable"] == 0
+    assert body["card"]["balance"]["rewardsRedeemed"] == 4
+    assert r1.json() == r2.json()               # identical replay
+    assert len(repo.txns) == 1                   # applied exactly once, not double-counted
+    assert repo.cards[CARD1].state.rewards_redeemed == 4  # replay didn't bump it again
+
+
+def test_redeem_with_none_available_raises_conflict(monkeypatch):
+    h, _ = _seed_operations(monkeypatch)  # seeded card has rewards_available=0
+    resp = TestClient(h.app).post(
+        "/operations/redeem",
+        json={"cardId": CARD1, "operationUserId": OP1},
+        headers={"Idempotency-Key": str(uuid.uuid4())})
+    assert resp.status_code == 409
+
+
 def test_cross_tenant_accrue_forbidden(monkeypatch):
     other_merchant = "99999999-9999-9999-9999-999999999999"
     h, _ = _seed_operations(monkeypatch, merchant_id=other_merchant)

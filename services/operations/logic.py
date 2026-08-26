@@ -25,6 +25,7 @@ class CardState:
     rewards_available: int
     active: bool
     membership_active_until: date | None = None
+    rewards_redeemed: int = 0     # total ever redeemed — accrual never touches this
 
 
 @dataclass(frozen=True)
@@ -74,7 +75,8 @@ def accrue(rules: ProgramRules, state: CardState, *,
 def redeem(state: CardState) -> CardState:
     if state.rewards_available < 1:
         raise RewardMechanicError("no reward available to redeem")
-    return replace(state, rewards_available=state.rewards_available - 1)
+    return replace(state, rewards_available=state.rewards_available - 1,
+                   rewards_redeemed=state.rewards_redeemed + 1)
 
 
 def validate_access(state: CardState, *, today: date | None = None) -> tuple[bool, str]:

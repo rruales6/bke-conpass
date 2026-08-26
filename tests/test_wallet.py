@@ -51,7 +51,8 @@ def _content(**over) -> PassContent:
         card_id=CARD1, program_id=P1, merchant_id=M1,
         program_type="loyalty_stamps", program_name="Café", merchant_name="Conpass QA",
         holder_name="Juan R.", opaque_token="TOK-abc", stamps=3, stamps_for_reward=8,
-        rewards_available=1, reward_text="Café gratis", accent_color="#0EA5E9",
+        rewards_available=1, rewards_redeemed=2, reward_text="Café gratis",
+        accent_color="#0EA5E9",
         member_email="maria@example.com",
     )
     base.update(over)
@@ -73,29 +74,33 @@ def test_object_payload_maps_stamps_and_appearance(provider):
     mods = {m["id"]: (m["header"], m["body"]) for m in obj["textModulesData"]}
     assert mods["hdr0"] == ("SELLOS", "●●●○○○○○")
     assert mods["hdr1"] == ("PROGRESO", "3 / 8")   # the figure, for reading at a glance
-    assert mods["hdr2"] == ("PREMIOS", "1")
+    # Claimable and claimed are different numbers and must never share a cell.
+    assert mods["hdr2"] == ("POR CANJEAR", "1")
+    assert mods["hdr3"] == ("CANJEADOS", "2")
     assert mods["sec0"] == ("RECOMPENSA", "Café gratis")
     assert mods["sec1"] == ("MIEMBRO", "Juan R.")
     assert mods["sec2"] == ("CORREO", "maria@example.com")
 
 
 def test_stamp_row_without_a_target(provider):
-    """No target means no progress to draw — the count stands alone and the goal cell,
-    which the template still references, says so rather than rendering blank."""
-    mods = {m["id"]: (m["header"], m["body"])
-            for m in provider._object_payload(
-                _content(stamps=3, stamps_for_reward=None))["textModulesData"]}
-    assert mods["hdr0"] == ("SELLOS", "3")
-    assert mods["hdr1"] == ("META", "—")
+    """No target means no strip and no fraction — the count stands alone."""
+    obj = provider._object_payload(_content(stamps=3, stamps_for_reward=None))
+    mods = {m["id"]: (m["header"], m["body"]) for m in obj["textModulesData"]}
+    assert "hdr0" not in mods                       # nothing to draw, so no strip row
+    assert mods["hdr1"] == ("PROGRESO", "3")
 
 
 def test_stamp_strip_collapses_when_the_target_is_too_large(provider):
     """Past a dozen the dots blur together, so the strip gives way to the figures."""
     from conpass_common.providers.google_wallet import MAX_STAMP_DOTS
-    mods = {m["id"]: m["body"] for m in provider._object_payload(
-        _content(stamps=5, stamps_for_reward=MAX_STAMP_DOTS + 1))["textModulesData"]}
-    assert mods["hdr0"] == "5"
-    assert mods["hdr1"] == str(MAX_STAMP_DOTS + 1)
+    big = _content(stamps=5, stamps_for_reward=MAX_STAMP_DOTS + 1)
+    mods = {m["id"]: m["body"] for m in provider._object_payload(big)["textModulesData"]}
+    assert "hdr0" not in mods
+    assert mods["hdr1"] == f"5 / {MAX_STAMP_DOTS + 1}"
+    # …and the class drops the full-width row along with it.
+    rows = (provider._class_payload(big)
+            ["classTemplateInfo"]["cardTemplateOverride"]["cardRowTemplateInfos"])
+    assert [list(r)[0] for r in rows] == ["threeItems", "oneItem", "twoItems"]
 
 
 def test_missing_card_level_values_render_a_placeholder(provider):
@@ -107,26 +112,30 @@ def test_missing_card_level_values_render_a_placeholder(provider):
 
 
 def test_object_payload_points_and_membership(provider):
-    pts = {m["id"]: (m["header"], m["body"]) for m in provider._object_payload(_content(
+    """Points have no strip, so PROGRESO carries the pair on its own."""
+    pts_obj = provider._object_payload(_content(
         program_type="loyalty_points", points=120, points_for_reward=200,
-        stamps=0, stamps_for_reward=None))["textModulesData"]}
-    assert pts["hdr0"] == ("PUNTOS", "120")
-    assert pts["hdr1"] == ("META", "200")
-    assert pts["hdr2"] == ("PREMIOS", "1")
+        stamps=0, stamps_for_reward=None))
+    pts = {m["id"]: (m["header"], m["body"]) for m in pts_obj["textModulesData"]}
+    assert "hdr0" not in pts
+    assert pts["hdr1"] == ("PROGRESO", "120 / 200")
+    assert pts["hdr2"] == ("POR CANJEAR", "1")
+    assert pts["hdr3"] == ("CANJEADOS", "2")
 
     mem_obj = provider._object_payload(_content(
         program_type="membership_pass", membership_active_until="2026-12-31",
         membership_includes="Acceso al gimnasio", reward_text=None))
     assert mem_obj["subheader"]["defaultValue"]["value"] == "Pase de membresía"
     mem = {m["id"]: (m["header"], m["body"]) for m in mem_obj["textModulesData"]}
-    assert mem["hdr0"] == ("ESTADO", "Activa")
-    assert mem["hdr1"] == ("VÁLIDA HASTA", "2026-12-31")
-    assert mem["hdr2"] == ("INCLUYE", "Acceso al gimnasio")
+    # A membership has nothing to claim, so it keeps the plain three-across row.
+    assert mem["hdr1"] == ("ESTADO", "Activa")
+    assert mem["hdr2"] == ("VÁLIDA HASTA", "2026-12-31")
+    assert mem["hdr3"] == ("INCLUYE", "Acceso al gimnasio")
 
     open_ended = {m["id"]: m["body"] for m in provider._object_payload(_content(
         program_type="membership_pass", membership_active_until=None,
         reward_text=None))["textModulesData"]}
-    assert open_ended["hdr1"] == "Sin caducidad"
+    assert open_ended["hdr2"] == "Sin caducidad"
 
 
 def test_labels_follow_the_card_language(provider):
@@ -136,6 +145,7 @@ def test_labels_follow_the_card_language(provider):
     assert obj["header"]["defaultValue"]["language"] == "en"
     mods = {m["id"]: m["header"] for m in obj["textModulesData"]}
     assert mods["hdr0"] == "STAMPS" and mods["hdr1"] == "PROGRESS"
+    assert mods["hdr2"] == "TO REDEEM" and mods["hdr3"] == "REDEEMED"
     assert mods["sec0"] == "PROGRAM REWARD" and mods["sec2"] == "EMAIL"
     # Anything unrecognised lands on Ecuador-first Spanish rather than empty labels.
     assert provider._object_payload(
@@ -151,12 +161,15 @@ def _paths(row: dict) -> list[str]:
 
 
 def test_class_template_draws_the_rows_on_the_card_front(provider):
+    """The strip owns a full-width row: at a third of the card it wrapped onto a second
+    line on a real phone, which is the defect this shape exists to fix."""
     rows = (provider._class_payload(_content())
             ["classTemplateInfo"]["cardTemplateOverride"]["cardRowTemplateInfos"])
-    assert [list(r)[0] for r in rows] == ["threeItems", "oneItem", "twoItems"]
-    assert _paths(rows[0]) == [f"object.textModulesData['hdr{i}']" for i in range(3)]
-    assert _paths(rows[1]) == ["object.textModulesData['sec0']"]
-    assert _paths(rows[2]) == ["object.textModulesData['sec1']",
+    assert [list(r)[0] for r in rows] == ["oneItem", "threeItems", "oneItem", "twoItems"]
+    assert _paths(rows[0]) == ["object.textModulesData['hdr0']"]
+    assert _paths(rows[1]) == [f"object.textModulesData['hdr{i}']" for i in (1, 2, 3)]
+    assert _paths(rows[2]) == ["object.textModulesData['sec0']"]
+    assert _paths(rows[3]) == ["object.textModulesData['sec1']",
                                "object.textModulesData['sec2']"]
 
 
@@ -165,8 +178,8 @@ def test_class_template_drops_the_reward_row_when_the_program_has_none(provider)
     unlike the per-card cells, which cannot vary by class."""
     rows = (provider._class_payload(_content(reward_text=None))
             ["classTemplateInfo"]["cardTemplateOverride"]["cardRowTemplateInfos"])
-    assert [list(r)[0] for r in rows] == ["threeItems", "twoItems"]
-    assert _paths(rows[1]) == ["object.textModulesData['sec1']",
+    assert [list(r)[0] for r in rows] == ["oneItem", "threeItems", "twoItems"]
+    assert _paths(rows[2]) == ["object.textModulesData['sec1']",
                                "object.textModulesData['sec2']"]
 
 
@@ -282,6 +295,7 @@ def test_update_replaces_the_whole_object(provider, monkeypatch):
     assert url == f"/genericObject/{ISSUER}.card_{CARD1}"
     mods = {m["id"]: m["body"] for m in body["textModulesData"]}
     assert mods["hdr0"] == "●●●●●●●○" and mods["hdr1"] == "7 / 8"
+    assert mods["hdr3"] == "2"  # the redeemed total travels with the update
     assert body["hexBackgroundColor"] == "#0EA5E9"  # appearance travels with the update
 
 

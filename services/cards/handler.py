@@ -23,6 +23,7 @@ def _card_model(c: dict) -> dict:
             "mechanic": "points" if c["type"] == "loyalty_points" else "stamps",
             "stamps": c.get("stamps", 0), "points": c.get("points", 0),
             "rewardsAvailable": c.get("rewards_available", 0),
+            "rewardsRedeemed": c.get("rewards_redeemed", 0),
             "membershipActiveUntil": c.get("membership_active_until"),
         },
         "holderName": c.get("holder_name"),

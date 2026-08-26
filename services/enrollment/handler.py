@@ -66,6 +66,7 @@ def _card_issued(card: dict, program: dict, wallet_links: dict | None = None) ->
                 "points": card.get("points", 0),
                 "pointsForReward": program.get("points_for_reward"),
                 "rewardsAvailable": card.get("rewards_available", 0),
+                "rewardsRedeemed": card.get("rewards_redeemed", 0),
                 "membershipActiveUntil": card.get("membership_active_until"),
             },
             "holderName": card.get("holder_name"),

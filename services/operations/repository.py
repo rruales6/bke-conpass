@@ -175,6 +175,7 @@ class SupabaseRepository:
         c.table("cards").update({
             "stamps": s.stamps, "points": s.points,
             "rewards_available": s.rewards_available,
+            "rewards_redeemed": s.rewards_redeemed,
         }).eq("id", card.id).execute()
         c.table("transactions").insert({
             "id": txn.id, "card_id": txn.card_id, "merchant_id": card.merchant_id,
@@ -202,5 +203,6 @@ def _row_to_card(r: dict) -> CardRow:
             stamps=r.get("stamps", 0), points=r.get("points", 0),
             rewards_available=r.get("rewards_available", 0), active=r.get("active", True),
             membership_active_until=date.fromisoformat(muntil) if muntil else None,
+            rewards_redeemed=r.get("rewards_redeemed", 0),
         ),
     )

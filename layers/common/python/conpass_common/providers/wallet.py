@@ -53,7 +53,8 @@ class PassContent:
     stamps_for_reward: int | None = None
     points: int = 0
     points_for_reward: int | None = None
-    rewards_available: int = 0
+    rewards_available: int = 0   # earned, waiting to be claimed
+    rewards_redeemed: int = 0    # already claimed — a separate running total
     reward_text: str | None = None
     membership_active_until: str | None = None
     membership_includes: str | None = None
@@ -133,6 +134,7 @@ def build_pass_content(
         points=card.get("points") or 0,
         points_for_reward=program.get("points_for_reward"),
         rewards_available=card.get("rewards_available") or 0,
+        rewards_redeemed=card.get("rewards_redeemed") or 0,
         reward_text=program.get("reward"),
         membership_active_until=mu.isoformat() if hasattr(mu, "isoformat") else mu,
         membership_includes=program.get("membership_includes"),

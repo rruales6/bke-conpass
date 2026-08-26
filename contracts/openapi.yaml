@@ -1144,7 +1144,8 @@ components:
         stampsForReward: { type: integer }
         points: { type: integer, minimum: 0 }
         pointsForReward: { type: integer }
-        rewardsAvailable: { type: integer, minimum: 0 }
+        rewardsAvailable: { type: integer, minimum: 0, description: Rewards earned and not yet claimed. }
+        rewardsRedeemed: { type: integer, minimum: 0, description: Rewards already claimed — never decreases. }
         membershipActiveUntil: { type: string, format: date }
       additionalProperties: false
 

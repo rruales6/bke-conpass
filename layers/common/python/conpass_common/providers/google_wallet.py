@@ -58,8 +58,10 @@ _LABELS: dict[str, dict[str, str]] = {
         "stamps": "SELLOS",
         "progress": "PROGRESO",
         "points": "PUNTOS",
-        "goal": "META",
-        "rewards": "PREMIOS",
+        # Short on purpose: these sit in third-width cells, and a label that wraps is
+        # the same defect as the strip that forced this layout.
+        "to_redeem": "POR CANJEAR",
+        "redeemed": "CANJEADOS",
         "status": "ESTADO",
         "valid_until": "VÁLIDA HASTA",
         "includes": "INCLUYE",
@@ -76,8 +78,8 @@ _LABELS: dict[str, dict[str, str]] = {
         "stamps": "STAMPS",
         "progress": "PROGRESS",
         "points": "POINTS",
-        "goal": "GOAL",
-        "rewards": "REWARDS",
+        "to_redeem": "TO REDEEM",
+        "redeemed": "REDEEMED",
         "status": "STATUS",
         "valid_until": "VALID UNTIL",
         "includes": "INCLUDES",
@@ -194,16 +196,33 @@ class GoogleWalletProvider(WalletProvider):
         """The rows drawn on the front of the card.
 
         Row shape is a PROGRAM decision, so it belongs on the class: which cells exist
-        depends on the program's type and whether it defines a reward. Per-CARD gaps
-        (a customer who enrolled without a name or email) cannot vary the template, so
-        those cells always exist and the object fills them with a placeholder.
+        depends on the program's type, whether its stamp target is small enough to draw,
+        and whether it defines a reward. Per-CARD gaps (a customer who enrolled without
+        a name or email) cannot vary the template, so those cells always exist and the
+        object fills them with a placeholder.
         """
-        rows = [_row_three("hdr0", "hdr1", "hdr2")]
+        rows = []
+        if self._has_strip(content):
+            # A strip of eight dots does not fit a third of the card — observed wrapping
+            # onto a second line on a real phone — so it gets the full width to itself.
+            rows.append(_row_one("hdr0"))
+        rows.append(_row_three("hdr1", "hdr2", "hdr3"))
         if content.reward_text:
             # Full width: a reward is a sentence ("El 8.º café es gratis"), not a figure.
             rows.append(_row_one("sec0"))
         rows.append(_row_two("sec1", "sec2"))
         return rows
+
+    @staticmethod
+    def _has_strip(content: PassContent) -> bool:
+        """Whether this PROGRAM draws a stamp strip at all.
+
+        Deliberately depends only on program-level facts (type and target), never on a
+        card's current count — the class template cannot vary per holder.
+        """
+        return (content.program_type == "loyalty_stamps"
+                and bool(content.stamps_for_reward)
+                and content.stamps_for_reward <= MAX_STAMP_DOTS)
 
     def _class_payload(self, content: PassContent) -> dict:
         return {
@@ -230,26 +249,24 @@ class GoogleWalletProvider(WalletProvider):
         def add(module_id: str, key: str, body: str | None) -> None:
             mods.append({"id": module_id, "header": label[key], "body": body or _PLACEHOLDER})
 
-        if content.program_type == "loyalty_points":
-            total = content.points_for_reward
-            add("hdr0", "points", str(content.points))
-            add("hdr1", "goal", str(total) if total else None)
-            add("hdr2", "rewards", str(content.rewards_available))
-        elif content.program_type == "membership_pass":
-            add("hdr0", "status", label["active"])
-            add("hdr1", "valid_until", content.membership_active_until or label["no_expiry"])
-            add("hdr2", "includes", content.membership_includes)
-        else:  # loyalty_stamps — the default mechanic
-            total = content.stamps_for_reward
-            strip = stamp_strip(content.stamps, total)
-            add("hdr0", "stamps", strip or str(content.stamps))
-            # The dots are for recognition, the figure for reading. When the strip is too
-            # long to draw, the first cell already holds the count and this one the target.
-            if strip:
-                add("hdr1", "progress", f"{min(content.stamps, total or 0)} / {total}")
-            else:
-                add("hdr1", "goal", str(total) if total else None)
-            add("hdr2", "rewards", str(content.rewards_available))
+        if content.program_type == "membership_pass":
+            # A membership has nothing to claim, so it keeps the plain three-across row.
+            add("hdr1", "status", label["active"])
+            add("hdr2", "valid_until", content.membership_active_until or label["no_expiry"])
+            add("hdr3", "includes", content.membership_includes)
+        else:
+            if content.program_type == "loyalty_points":
+                held, total = content.points, content.points_for_reward
+            else:  # loyalty_stamps — the default mechanic
+                held, total = content.stamps, content.stamps_for_reward
+                if self._has_strip(content):
+                    add("hdr0", "stamps", stamp_strip(held, total))
+            # One cell carries the pair. The dots are for recognition and this is for
+            # reading, so it stays even when the strip is drawn; with no target there is
+            # no fraction to state and the count stands alone.
+            add("hdr1", "progress", f"{min(held, total)} / {total}" if total else str(held))
+            add("hdr2", "to_redeem", str(content.rewards_available))
+            add("hdr3", "redeemed", str(content.rewards_redeemed))
 
         if content.reward_text:
             add("sec0", "reward", content.reward_text)
