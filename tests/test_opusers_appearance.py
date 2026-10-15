@@ -176,9 +176,6 @@ class _FakeProgramsCrudRepo:
         self.created: dict | None = None
         self.updated_patch: dict | None = None
 
-    def program_limit(self, merchant_id):
-        return None
-
     def count_programs(self, merchant_id):
         return 0
 

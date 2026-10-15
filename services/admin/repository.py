@@ -34,6 +34,11 @@ class AdminRepository:
             "merchant_id", merchant_id).execute().data
         return rows[0]["active_pass_count"] if rows else 0
 
+    def active_card_counts(self) -> dict[str, int]:
+        """merchant_id -> active cards, for every merchant in one query."""
+        rows = self._c.table("merchant_active_passes").select("*").execute().data
+        return {r["merchant_id"]: r["active_pass_count"] for r in rows}
+
     # --- platform payment settings (no admin-side GET: the public /payment-settings
     # endpoint already serves the same shape and needs no auth, so the console reads
     # through that instead of duplicating a fetch here) ---

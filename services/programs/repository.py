@@ -13,11 +13,6 @@ class ProgramsRepository:
             "merchant_id", merchant_id).execute()
         return res.count or 0
 
-    def program_limit(self, merchant_id: str) -> int | None:
-        rows = self._c.table("subscriptions").select("program_limit").eq(
-            "merchant_id", merchant_id).execute().data
-        return rows[0]["program_limit"] if rows else None
-
     def create(self, data: dict) -> dict:
         return self._c.table("programs").insert(data).execute().data[0]
 

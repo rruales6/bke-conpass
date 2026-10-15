@@ -132,6 +132,9 @@ functions:
       - httpApi:              # public self-serve demo context
           method: GET
           path: /demo
+      - httpApi:              # public — plan catalog (signup page + in-app plan screen)
+          method: GET
+          path: /plans
       - httpApi:              # public — transfer details shown on the signup page
           method: GET
           path: /payment-settings
@@ -141,6 +144,9 @@ functions:
       - httpApi:
           method: GET
           path: /merchants/{merchantId}
+      - httpApi:
+          method: GET
+          path: /merchants/{merchantId}/usage
       - httpApi:
           method: GET
           path: /merchants/{merchantId}/operation-users

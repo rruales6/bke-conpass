@@ -105,6 +105,25 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/PaymentSettings" }
 
+  /plans:
+    get:
+      tags: [merchants]
+      operationId: listPlans
+      summary: Public — the self-service plan catalog (price, inclusions, overage, features)
+      description: >
+        Single source of truth for pricing (business model §3, D17). Signup, the
+        merchant panel and the admin console all read prices from here; nothing in the
+        PWA hardcodes a price. Enterprise / white-label is off-catalog and never listed.
+      security: []
+      responses:
+        "200":
+          description: Plans, cheapest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Plan" }
+
   /payment-proofs/upload-url:
     post:
       tags: [merchants]
@@ -167,6 +186,29 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Merchant" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /merchants/{merchantId}/usage:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+    get:
+      tags: [merchants]
+      operationId: getMerchantUsage
+      summary: Current plan, consumption against its inclusions, and the estimated monthly bill
+      description: >
+        Two-layer pricing (D17) — subscription + consumption. Active cards are a LEVEL
+        metric (cards currently active, counted now), billed above the plan's inclusion
+        at the plan's per-card rate. Notifications are counted per calendar month
+        (always 0 until notifications ship). The figure is an ESTIMATE for the manual
+        billing workflow, not a charge. merchant_owner of that merchant, or platform_admin.
+      responses:
+        "200":
+          description: Usage
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlanUsage" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /merchants/{merchantId}/operation-users:
@@ -526,6 +568,7 @@ paths:
       tags: [birthday]
       operationId: setBirthdayAutomation
       summary: Configure automatic birthday benefit issuance
+      description: Pro only (feature `automated_campaigns`); other plans get 402 `feature_not_in_plan`.
       requestBody:
         required: true
         content:
@@ -537,12 +580,14 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BirthdayAutomation" }
+        "402": { $ref: "#/components/responses/TierLimit" }
 
   /birthday-cards:
     post:
       tags: [birthday]
       operationId: issueBirthdayCard
       summary: Issue a unique birthday benefit card for a customer
+      description: Pro only (feature `automated_campaigns`); other plans get 402 `feature_not_in_plan`.
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
@@ -556,6 +601,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BirthdayCard" }
+        "402": { $ref: "#/components/responses/TierLimit" }
 
   /admin/clients:
     get:
@@ -671,6 +717,9 @@ paths:
       tags: [notifications]
       operationId: sendReminder
       summary: Send a push reminder to eligible customers (stubbed provider)
+      description: >
+        A manual campaign — Growth and Pro (feature `manual_campaigns`); Starter gets 402
+        `feature_not_in_plan`. segment `birthday` is an automated campaign → Pro only.
       requestBody:
         required: true
         content:
@@ -682,6 +731,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ReminderResult" }
+        "402": { $ref: "#/components/responses/TierLimit" }
 
 components:
   securitySchemes:
@@ -751,7 +801,9 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
     TierLimit:
-      description: Subscription tier limit reached
+      description: >
+        Plan limit reached (`tier_limit` — operation users) or the feature is not
+        in the merchant's plan (`feature_not_in_plan`, details.feature + details.requiredTier).
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
@@ -783,7 +835,50 @@ components:
 
     Tier:
       type: string
-      enum: [starter, growth, pro, enterprise]
+      description: Self-service plans. Enterprise / white-label is quoted off-catalog (D17).
+      enum: [starter, growth, pro]
+
+    PlanFeature:
+      type: string
+      description: >
+        reports = reports + campaign dashboard; user_management = operation users;
+        nearby_notifications = "Estás cerca"; manual_campaigns = personalised notifications
+        + manual campaigns; automated_campaigns = automatic birthdays / special dates.
+      enum: [reports, user_management, nearby_notifications, manual_campaigns, automated_campaigns]
+
+    Plan:
+      type: object
+      required: [tier, priceUsd, includedCards, extraCardUsd, includedNotifications, features]
+      properties:
+        tier: { $ref: "#/components/schemas/Tier" }
+        priceUsd: { type: number, description: Monthly subscription, USD. }
+        includedCards: { type: integer, description: Active cards included per month. }
+        extraCardUsd: { type: number, description: USD per active card above the inclusion. }
+        includedNotifications: { type: integer, description: Notifications included per month (0 = feature not in plan). }
+        extraNotificationUsd: { type: number, description: USD per notification above the inclusion. Absent when the plan has no notifications. }
+        operationUserLimit: { type: integer, description: Absent = unlimited. }
+        features:
+          type: array
+          items: { $ref: "#/components/schemas/PlanFeature" }
+      additionalProperties: false
+
+    PlanUsage:
+      type: object
+      required: [plan, activeCards, extraCards, extraCardsUsd, notificationsUsed, extraNotifications,
+                 extraNotificationsUsd, estimatedTotalUsd, programCount, operationUserCount, periodStart]
+      properties:
+        plan: { $ref: "#/components/schemas/Plan" }
+        activeCards: { type: integer, description: Cards currently active (billing metric). }
+        extraCards: { type: integer, description: max(0, activeCards - plan.includedCards). }
+        extraCardsUsd: { type: number }
+        notificationsUsed: { type: integer, description: This calendar month. 0 until notifications ship. }
+        extraNotifications: { type: integer }
+        extraNotificationsUsd: { type: number }
+        estimatedTotalUsd: { type: number, description: plan.priceUsd + both overages, rounded to cents. }
+        programCount: { type: integer }
+        operationUserCount: { type: integer }
+        periodStart: { type: string, format: date, description: First day of the current billing month (UTC). }
+      additionalProperties: false
 
     ProgramType:
       type: string
@@ -953,15 +1048,14 @@ components:
 
     Subscription:
       type: object
-      required: [tier, paymentStatus, mrrUsd]
+      required: [tier, paymentStatus, priceUsd, includedCards]
       properties:
         tier: { $ref: "#/components/schemas/Tier" }
         paymentStatus: { $ref: "#/components/schemas/PaymentStatus" }
-        mrrUsd: { type: number }
-        activePassLimit: { type: integer, description: Tier cap on active installed passes. }
-        activePassCount: { type: integer, description: Billing metric — installed & not deleted. }
-        programLimit: { type: integer }
-        operationUserLimit: { type: integer }
+        priceUsd: { type: number, description: The plan's monthly price, from the catalog. }
+        includedCards: { type: integer, description: Active cards included — NOT a cap; extra cards are billed. }
+        activeCards: { type: integer, description: Billing metric — cards currently active. }
+        operationUserLimit: { type: integer, description: Absent = unlimited. }
         nextChargeAt: { type: string, format: date }
         lastPaymentAt: { type: string, format: date }
       additionalProperties: false
@@ -1304,14 +1398,17 @@ components:
 
     AdminClient:
       type: object
-      required: [merchantId, name, city, tier, paymentStatus, mrrUsd]
+      required: [merchantId, name, city, tier, paymentStatus, priceUsd, activeCards, includedCards, estimatedMonthlyUsd]
       properties:
         merchantId: { type: string, format: uuid }
         name: { type: string }
         city: { type: string }
         tier: { $ref: "#/components/schemas/Tier" }
         paymentStatus: { $ref: "#/components/schemas/PaymentStatus" }
-        mrrUsd: { type: number }
+        priceUsd: { type: number, description: Plan subscription price. }
+        activeCards: { type: integer }
+        includedCards: { type: integer }
+        estimatedMonthlyUsd: { type: number, description: Subscription + card overage (notifications 0 until they ship). }
         since: { type: string, format: date }
         nextChargeAt: { type: string, format: date }
         lastPaymentAt: { type: string, format: date }
@@ -1325,12 +1422,19 @@ components:
 
     PlatformStats:
       type: object
-      required: [activeClients, mrrUsd]
+      required: [activeClients, mrrUsd, subscriptionMrrUsd, tierCounts]
       properties:
         activeClients: { type: integer }
-        mrrUsd: { type: number }
-        growthCount: { type: integer }
-        starterCount: { type: integer }
+        mrrUsd: { type: number, description: Sum of estimatedMonthlyUsd over PAID clients (subscription + overage). }
+        subscriptionMrrUsd: { type: number, description: Subscription part only, paid clients. }
+        tierCounts:
+          type: object
+          required: [starter, growth, pro]
+          properties:
+            starter: { type: integer }
+            growth: { type: integer }
+            pro: { type: integer }
+          additionalProperties: false
         overdueCount: { type: integer }
       additionalProperties: false
 

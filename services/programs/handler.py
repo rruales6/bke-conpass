@@ -6,7 +6,7 @@ import logging
 from conpass_common import CurrentIdentity, create_app, lambda_handler
 from conpass_common.assets import presign_upload, public_asset_url
 from conpass_common.db import service_client
-from conpass_common.errors import Forbidden, NotFound, TierLimit, ValidationFailed
+from conpass_common.errors import Forbidden, NotFound, ValidationFailed
 from conpass_common.models import AppearanceUploadRequest, ProgramCreate, ProgramUpdate
 from conpass_common.providers import get_wallet_provider
 from conpass_common.providers.wallet import build_pass_content
@@ -100,10 +100,7 @@ def create_program(body: ProgramCreate, identity: CurrentIdentity):
     if merchant_id is None:
         raise Forbidden("no merchant in scope")
     repo = get_repo()
-    limit = repo.program_limit(merchant_id)
-    if limit is not None and repo.count_programs(merchant_id) >= limit:
-        raise TierLimit(f"program limit ({limit}) reached for this tier")
-
+    # No program limit on any plan (Phase 13) — only active cards are metered.
     appearance = _appearance_patch(body.appearance)
     program = repo.create({
         "merchant_id": merchant_id,

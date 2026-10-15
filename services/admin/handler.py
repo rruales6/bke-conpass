@@ -6,6 +6,7 @@ from conpass_common.assets import presign_payment_proof_download, presign_paymen
 from conpass_common.errors import NotConfigured, NotFound, ValidationFailed
 from conpass_common.models import PaymentQrUploadRequest, PaymentSettingsUpdate, SubscriptionUpdate
 from conpass_common.payment_settings import payment_settings_model
+from conpass_common.plans import TIER_ORDER, estimate, get_plan, subscription_to_api
 
 from .repository import AdminRepository
 
@@ -28,14 +29,24 @@ def get_repo() -> AdminRepository:
     return AdminRepository()
 
 
-def _admin_client_model(m: dict, sub: dict | None) -> dict:
+def _admin_client_model(m: dict, sub: dict | None, active_cards: int = 0) -> dict:
     out = {
         "merchantId": m["id"], "name": m["business_name"], "city": m.get("city"),
         "tier": sub["tier"] if sub else None,
         "paymentStatus": sub["payment_status"] if sub else None,
-        "mrrUsd": float(sub["mrr_usd"]) if sub else 0.0,
         "since": m["created_at"],
     }
+    if sub:
+        plan = get_plan(sub["tier"])
+        # Notifications are not metered yet (stub service) -> 0.
+        est = estimate(plan, active_cards, 0)
+        out["priceUsd"] = float(plan.price_usd)
+        out["activeCards"] = active_cards
+        out["includedCards"] = plan.included_cards
+        out["estimatedMonthlyUsd"] = float(est.total_usd)
+    else:
+        out.update(priceUsd=0.0, activeCards=active_cards, includedCards=0,
+                   estimatedMonthlyUsd=0.0)
     if sub and sub.get("next_charge_at") is not None:
         out["nextChargeAt"] = sub["next_charge_at"]
     if sub and sub.get("last_payment_at") is not None:
@@ -46,27 +57,15 @@ def _admin_client_model(m: dict, sub: dict | None) -> dict:
     return out
 
 
-def _subscription_model(sub: dict, active_pass_count: int) -> dict:
-    return {
-        "tier": sub["tier"],
-        "paymentStatus": sub["payment_status"],
-        "mrrUsd": float(sub["mrr_usd"]),
-        "activePassLimit": sub.get("active_pass_limit"),
-        "activePassCount": active_pass_count,
-        "programLimit": sub.get("program_limit"),
-        "operationUserLimit": sub.get("operation_user_limit"),
-        "nextChargeAt": sub.get("next_charge_at"),
-        "lastPaymentAt": sub.get("last_payment_at"),
-    }
-
-
 @app.get("/admin/clients")
 def list_clients(identity: CurrentIdentity):
     identity.require_role("platform_admin")
     repo = get_repo()
     merchants = repo.list_merchants()
     subs_by_merchant = {s["merchant_id"]: s for s in repo.list_subscriptions()}
-    return [_admin_client_model(m, subs_by_merchant.get(m["id"])) for m in merchants]
+    active = repo.active_card_counts()   # one query for every merchant (no N+1)
+    return [_admin_client_model(m, subs_by_merchant.get(m["id"]), active.get(m["id"], 0))
+            for m in merchants]
 
 
 @app.patch("/admin/clients/{merchant_id}/subscription")
@@ -85,7 +84,7 @@ def update_subscription(merchant_id: str, body: SubscriptionUpdate, identity: Cu
     updated = repo.update_subscription(merchant_id, patch) if patch else existing
 
     active_pass_count = repo.active_pass_count(merchant_id)
-    return _subscription_model(updated, active_pass_count)
+    return subscription_to_api(updated, active_pass_count)
 
 
 @app.get("/admin/clients/{merchant_id}/payment-proof")
@@ -128,13 +127,18 @@ def create_payment_qr_upload_url(body: PaymentQrUploadRequest, identity: Current
 @app.get("/admin/stats")
 def get_platform_stats(identity: CurrentIdentity):
     identity.require_role("platform_admin")
-    subs = get_repo().list_subscriptions()
+    repo = get_repo()
+    subs = repo.list_subscriptions()
+    active = repo.active_card_counts()
     paid = [s for s in subs if s.get("payment_status") == "paid"]
+    subscription_mrr = sum(get_plan(s["tier"]).price_usd for s in paid)
+    mrr = sum(estimate(get_plan(s["tier"]), active.get(s["merchant_id"], 0), 0).total_usd
+              for s in paid)
     return {
         "activeClients": len(paid),
-        "mrrUsd": float(sum(float(s["mrr_usd"]) for s in paid)),
-        "growthCount": sum(1 for s in subs if s.get("tier") == "growth"),
-        "starterCount": sum(1 for s in subs if s.get("tier") == "starter"),
+        "mrrUsd": float(mrr),
+        "subscriptionMrrUsd": float(subscription_mrr),
+        "tierCounts": {t: sum(1 for s in subs if s.get("tier") == t) for t in TIER_ORDER},
         "overdueCount": sum(1 for s in subs if s.get("payment_status") == "overdue"),
     }
 

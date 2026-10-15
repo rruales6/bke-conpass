@@ -46,8 +46,7 @@ class _FakeMerchantsRepo:
         self.sub_calls.append((merchant_id, tier, payment_proof_key, payment_proof_uploaded_at))
         return {
             "merchant_id": merchant_id, "tier": tier, "payment_status": "pending",
-            "mrr_usd": "49.00", "active_pass_limit": None, "program_limit": 3,
-            "operation_user_limit": None, "next_charge_at": None, "last_payment_at": None,
+            "next_charge_at": None, "last_payment_at": None,
             "payment_proof_key": payment_proof_key,
             "payment_proof_uploaded_at": payment_proof_uploaded_at,
         }
@@ -253,7 +252,7 @@ def test_update_payment_settings_requires_platform_admin(monkeypatch):
 
 def test_get_client_payment_proof_404_when_missing(monkeypatch):
     h, _ = _seed_admin(monkeypatch, subscriptions=[
-        {"merchant_id": M1, "tier": "growth", "payment_status": "pending", "mrr_usd": "49.00"},
+        {"merchant_id": M1, "tier": "growth", "payment_status": "pending"},
     ])
     _identity(h.app, monkeypatch)
     resp = TestClient(h.app).get(f"/admin/clients/{M1}/payment-proof")
@@ -262,7 +261,7 @@ def test_get_client_payment_proof_404_when_missing(monkeypatch):
 
 def test_get_client_payment_proof_returns_presigned_link(monkeypatch):
     h, _ = _seed_admin(monkeypatch, subscriptions=[
-        {"merchant_id": M1, "tier": "growth", "payment_status": "pending", "mrr_usd": "49.00",
+        {"merchant_id": M1, "tier": "growth", "payment_status": "pending",
          "payment_proof_key": "payment-proofs/xyz.pdf",
          "payment_proof_uploaded_at": "2026-08-01T00:00:00Z"},
     ])

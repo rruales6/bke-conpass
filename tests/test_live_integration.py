@@ -46,7 +46,7 @@ def test_full_loop():
         })
         assert r.status_code == 201, r.text
         merchant_id = r.json()["merchant"]["id"]
-        assert r.json()["subscription"]["programLimit"] == 3  # growth tier default
+        assert r.json()["subscription"]["includedCards"] == 1000  # growth plan from the catalog
         assert r.json()["ownerInviteSent"] and r.json()["ownerTempPassword"]  # Phase 2
 
         owner = _owner(merchant_id)

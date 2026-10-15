@@ -254,12 +254,10 @@ def _admin_tables():
         ],
         "subscriptions": [
             {"merchant_id": M1, "tier": "growth", "payment_status": "paid",
-             "mrr_usd": 49, "active_pass_limit": 1500, "program_limit": 3,
-             "operation_user_limit": 5, "next_charge_at": "2026-08-01",
+             "next_charge_at": "2026-08-01",
              "last_payment_at": "2026-07-01"},
             {"merchant_id": M2, "tier": "starter", "payment_status": "overdue",
-             "mrr_usd": 19, "active_pass_limit": 250, "program_limit": 1,
-             "operation_user_limit": 1, "next_charge_at": "2026-07-20",
+             "next_charge_at": "2026-07-20",
              "last_payment_at": None},
         ],
         "merchant_active_passes": [
@@ -285,12 +283,18 @@ def test_admin_clients_join(monkeypatch):
     assert body[0]["city"] == "Cuenca"
     assert body[0]["tier"] == "starter"
     assert body[0]["paymentStatus"] == "overdue"
-    assert body[0]["mrrUsd"] == 19.0
+    assert body[0]["priceUsd"] == 4.99
+    assert body[0]["includedCards"] == 200
+    assert body[0]["activeCards"] == 0
+    assert body[0]["estimatedMonthlyUsd"] == 4.99
     assert "lastPaymentAt" not in body[0]
 
     c1 = next(c for c in body if c["merchantId"] == M1)
     assert c1["tier"] == "growth"
-    assert c1["mrrUsd"] == 49.0
+    assert c1["priceUsd"] == 14.99
+    assert c1["activeCards"] == 120
+    assert c1["includedCards"] == 1000
+    assert c1["estimatedMonthlyUsd"] == 14.99     # 120 < 1000 included -> no overage
     assert c1["nextChargeAt"] == "2026-08-01"
     assert c1["lastPaymentAt"] == "2026-07-01"
 
@@ -314,9 +318,9 @@ def test_admin_stats_aggregation(monkeypatch):
     assert r.status_code == 200
     body = r.json()
     assert body["activeClients"] == 1          # only M1 is paid
-    assert body["mrrUsd"] == 49.0               # sum of paid mrr_usd only
-    assert body["growthCount"] == 1
-    assert body["starterCount"] == 1
+    assert body["mrrUsd"] == 14.99              # paid clients only (M1, growth, no overage)
+    assert body["subscriptionMrrUsd"] == 14.99
+    assert body["tierCounts"] == {"starter": 1, "growth": 1, "pro": 0}
     assert body["overdueCount"] == 1
 
 
@@ -334,8 +338,10 @@ def test_admin_subscription_patch_updates_and_returns_active_pass_count(monkeypa
     body = r.json()
     assert body["paymentStatus"] == "paid"
     assert body["tier"] == "starter"            # unchanged field preserved
-    assert body["activePassCount"] == 0         # no row in merchant_active_passes for M2
-    assert body["mrrUsd"] == 19.0
+    assert body["activeCards"] == 0             # no row in merchant_active_passes for M2
+    assert body["priceUsd"] == 4.99
+    assert body["includedCards"] == 200
+    assert body["operationUserLimit"] == 2
 
 
 def test_admin_subscription_patch_tier_change(monkeypatch):
@@ -352,7 +358,10 @@ def test_admin_subscription_patch_tier_change(monkeypatch):
     body = r.json()
     assert body["tier"] == "pro"
     assert body["paymentStatus"] == "paid"      # unchanged
-    assert body["activePassCount"] == 120
+    assert body["activeCards"] == 120
+    assert body["priceUsd"] == 24.99
+    assert "operationUserLimit" not in body     # pro = unlimited
+    assert tables["subscriptions"][0]["tier"] == "pro"
 
 
 def test_admin_subscription_patch_missing_merchant_404(monkeypatch):

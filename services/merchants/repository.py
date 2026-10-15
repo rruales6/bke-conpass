@@ -80,3 +80,14 @@ class MerchantsRepository:
         res = self._c.table("profiles").select("user_id", count="exact").eq(
             "merchant_id", merchant_id).eq("role", "operation_user").execute()
         return res.count or 0
+
+    # --- plan usage (GET /merchants/{id}/usage) ---
+    def active_card_count(self, merchant_id: str) -> int:
+        rows = self._c.table("merchant_active_passes").select("*").eq(
+            "merchant_id", merchant_id).execute().data
+        return rows[0]["active_pass_count"] if rows else 0
+
+    def count_programs(self, merchant_id: str) -> int:
+        res = self._c.table("programs").select("id", count="exact").eq(
+            "merchant_id", merchant_id).execute()
+        return res.count or 0

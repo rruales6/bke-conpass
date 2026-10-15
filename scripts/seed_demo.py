@@ -48,7 +48,7 @@ def main() -> None:
             "is_demo": True,
         }).execute().data[0]
         merchant_id = merchant["id"]
-        c.table("subscriptions").insert({"merchant_id": merchant_id, "tier": "pro"}).execute()
+        c.table("subscriptions").insert({"merchant_id": merchant_id, "tier": "growth"}).execute()
         owner = provision_user(email=DEMO_OWNER_EMAIL, roles=["merchant_owner"],
                                merchant_id=merchant_id, name="Demo Owner")
         c.auth.admin.update_user_by_id(owner.user_id, {"password": DEMO_PASSWORD})

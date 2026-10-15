@@ -1,8 +1,8 @@
 """Apple Wallet provider — placeholder proving the abstraction is vendor-neutral.
 
 Implemented in a later phase (PassKit .pkpass signing + APNs push updates + the
-PassKit web-service protocol, BYO-cert for Enterprise). It requires no changes to any
-feature Lambda — only this class and the apple_wallet.* secrets. Kept here so the
+PassKit web-service protocol, BYO-cert for off-catalog white-label clients). It requires no changes
+to any feature Lambda — only this class and the apple_wallet.* secrets. Kept here so the
 factory and data model (wallet_objects table) are Apple-ready from day one.
 """
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """merchants service — B2B onboarding & subscription (Función 02).
 
-Onboarding creates the tenant (merchant + subscription with tier-defaulted limits),
-records payment through the PaymentProvider stub (D9), and provisions the owner's
+Onboarding creates the tenant (merchant + subscription; price and limits come from the
+plan catalog), records payment through the PaymentProvider stub (D9), and provisions the owner's
 Supabase Auth login (merchant_owner role in app_metadata) — returning a temp password
 for first login (Función 03). Operators are provisioned the same way, tier-limited.
 """
@@ -21,6 +21,16 @@ from conpass_common.models import (
     PaymentProofUploadRequest,
 )
 from conpass_common.payment_settings import payment_settings_model
+from conpass_common.plans import (
+    PLANS,
+    TIER_ORDER,
+    estimate,
+    get_plan,
+    next_tier_with_more_operation_users,
+    period_start,
+    plan_to_api,
+    subscription_to_api,
+)
 from conpass_common.providers import get_payment_provider
 from conpass_common.providers.payment import PaymentIntent
 from conpass_common.provisioning import (
@@ -43,17 +53,8 @@ def get_repo() -> MerchantsRepository:
     return MerchantsRepository()
 
 
-def _subscription_model(sub: dict) -> dict:
-    return {
-        "tier": sub["tier"],
-        "paymentStatus": sub["payment_status"],
-        "mrrUsd": float(sub["mrr_usd"]),
-        "activePassLimit": sub.get("active_pass_limit"),
-        "programLimit": sub.get("program_limit"),
-        "operationUserLimit": sub.get("operation_user_limit"),
-        "nextChargeAt": sub.get("next_charge_at"),
-        "lastPaymentAt": sub.get("last_payment_at"),
-    }
+def _subscription_model(sub: dict, active_cards: int | None = None) -> dict:
+    return subscription_to_api(sub, active_cards)
 
 
 def _merchant_model(m: dict, sub: dict | None = None) -> dict:
@@ -73,6 +74,13 @@ def get_payment_settings():
     """Public: the transfer/DEUNA account details shown on the signup page (Función
     02) — platform-admin maintains them in Función 04 (PATCH /admin/payment-settings)."""
     return payment_settings_model(get_repo().get_payment_settings())
+
+
+@app.get("/plans")
+def list_plans():
+    """Public: the plan catalog (prices, inclusions, features) for the signup page and
+    the in-app plan screen. Single source: conpass_common.plans."""
+    return [plan_to_api(PLANS[t]) for t in TIER_ORDER]
 
 
 @app.post("/payment-proofs/upload-url")
@@ -116,7 +124,7 @@ def onboard_merchant(body: MerchantOnboardRequest):
     # Record payment (stub: manual proof; platform-admin confirms activation).
     get_payment_provider().submit(PaymentIntent(
         merchant_id=merchant["id"], tier=body.tier.value,
-        amount_usd=float(sub["mrr_usd"]), method=body.payment.method.value,
+        amount_usd=float(get_plan(body.tier.value).price_usd), method=body.payment.method.value,
         proof_storage_key=body.payment.proofStorageKey,
     ))
 
@@ -170,6 +178,35 @@ def get_merchant(merchant_id: str, identity: CurrentIdentity):
     return _merchant_model(m, repo.get_subscription(merchant_id))
 
 
+@app.get("/merchants/{merchant_id}/usage")
+def get_usage(merchant_id: str, identity: CurrentIdentity):
+    """Plan consumption for the current billing month + the estimated invoice."""
+    identity.require_merchant(merchant_id)   # owner of THIS merchant, or platform_admin
+    repo = get_repo()
+    sub = repo.get_subscription(merchant_id)
+    if sub is None:
+        raise NotFound("subscription not found")
+    plan = get_plan(sub["tier"])
+    active_cards = repo.active_card_count(merchant_id)
+    # No notifications table yet (notifications service is still a stub), so usage is 0
+    # until those ship; replace with this month's sent-count then.
+    notifications_used = 0
+    est = estimate(plan, active_cards, notifications_used)
+    return {
+        "plan": plan_to_api(plan),
+        "activeCards": active_cards,
+        "extraCards": est.extra_cards,
+        "extraCardsUsd": float(est.extra_cards_usd),
+        "notificationsUsed": notifications_used,
+        "extraNotifications": est.extra_notifications,
+        "extraNotificationsUsd": float(est.extra_notifications_usd),
+        "estimatedTotalUsd": float(est.total_usd),
+        "programCount": repo.count_programs(merchant_id),
+        "operationUserCount": repo.count_operation_users(merchant_id),
+        "periodStart": period_start(datetime.now(UTC).date()),
+    }
+
+
 @app.get("/merchants/{merchant_id}/operation-users")
 def list_operation_users(merchant_id: str, identity: CurrentIdentity):
     identity.require_merchant(merchant_id)
@@ -184,9 +221,17 @@ def add_operation_user(merchant_id: str, body: OperationUserCreate, identity: Cu
     identity.require_merchant(merchant_id)
     repo = get_repo()
     sub = repo.get_subscription(merchant_id)
-    limit = sub.get("operation_user_limit") if sub else None
-    if limit is not None and repo.count_operation_users(merchant_id) >= limit:
-        raise TierLimit(f"operation-user limit ({limit}) reached for this tier")
+    if sub is not None:
+        tier = sub["tier"]
+        limit = get_plan(tier).operation_user_limit   # None = unlimited
+        if limit is not None and repo.count_operation_users(merchant_id) >= limit:
+            details = {"limit": limit, "tier": tier}
+            required = next_tier_with_more_operation_users(tier)
+            if required is not None:
+                details["requiredTier"] = required
+            raise TierLimit(
+                f"operation-user limit ({limit}) reached for the {tier} plan",
+                details=details)
 
     op = provision_user(
         email=str(body.email), roles=["operation_user"],

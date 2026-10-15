@@ -57,6 +57,13 @@ class TierLimit(AppError):
     code = "tier_limit"
 
 
+class FeatureNotInPlan(AppError):
+    """The merchant's plan lacks this feature (details.requiredTier names the upgrade)."""
+
+    status_code = 402
+    code = "feature_not_in_plan"
+
+
 class RateLimited(AppError):
     status_code = 429
     code = "rate_limited"
