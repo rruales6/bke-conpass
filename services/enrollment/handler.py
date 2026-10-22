@@ -7,11 +7,12 @@ card. Wallet add-links are filled by the WalletProvider in Phase 4 (Google).
 from __future__ import annotations
 
 import logging
-import secrets
 from datetime import date, timedelta
 from typing import Annotated
 
 from conpass_common import create_app, lambda_handler
+from conpass_common.campaigns import SEASONAL, STATUS_DISABLED, campaign_status, require_active
+from conpass_common.cards import new_opaque_token
 from conpass_common.errors import NotFound, ValidationFailed
 from conpass_common.idempotency import IdempotencyStore, StoredResponse, run_idempotent
 from conpass_common.models import EnrollmentRequest, Language
@@ -112,8 +113,12 @@ def enroll_customer(
 
     def compute() -> StoredResponse:
         program = repo.get_program(program_id)
-        if program is None or not program.get("active", True):
-            raise NotFound("program not found or inactive")
+        if program is None:
+            raise NotFound("program not found")
+        # A switched-off campaign never enrols (also on replay, as before). Before this
+        # check was a 404 "inactive"; it is now the contract's 422 campaign_not_active.
+        if campaign_status(program) == STATUS_DISABLED:
+            require_active(program)
 
         # De-dup a repeat submission from the same device.
         if body.dedupeKey:
@@ -126,6 +131,11 @@ def enroll_customer(
                 links = _wallet_links(repo, existing, program, existing_customer,
                                       mutate=False)
                 return StoredResponse(200, _card_issued(existing, program, links))
+
+        # New cards only while the campaign is active (upcoming / ended seasonal windows
+        # refuse). The dedupe replay above is deliberately exempt: the customer already
+        # holds this card, so a repeat visit to the link still returns it after the end.
+        require_active(program)
 
         merchant_id = program["merchant_id"]
         customer = repo.create_customer({
@@ -150,13 +160,15 @@ def enroll_customer(
             "merchant_id": merchant_id,
             "customer_id": customer["id"],
             "type": program["type"],
-            "opaque_token": secrets.token_urlsafe(16),
+            "opaque_token": new_opaque_token(),
             "stamps": welcome if mechanic == "stamps" else 0,
             "points": welcome if mechanic == "points" else 0,
             "holder_name": _holder_name(body.fullName),
             "membership_active_until": muntil,
             "dedupe_key": body.dedupeKey,
             "language": _language(body.language),
+            # A seasonal card is born with its single discount available.
+            "rewards_available": 1 if program["type"] == SEASONAL else 0,
         })
         links = _wallet_links(repo, card, program, customer, mutate=True)
         return StoredResponse(201, _card_issued(card, program, links))

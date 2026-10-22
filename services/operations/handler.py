@@ -13,8 +13,10 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from conpass_common import CurrentIdentity, create_app, lambda_handler
+from conpass_common.campaigns import SEASONAL, campaign_fields, inactivity_fields, require_active
 from conpass_common.errors import (
     Conflict,
+    DiscountAlreadyUsed,
     NotFound,
     RateLimited,
     ValidationFailed,
@@ -101,6 +103,8 @@ def _program_model(p: dict) -> dict:
         "membershipIncludes": p.get("membership_includes"),
         "welcomeBonus": p.get("welcome_bonus", 0),
         "expiryDays": p.get("expiry_days"),
+        **inactivity_fields(p),
+        **campaign_fields(p),
         "appearance": {
             "color": p.get("color"),
             "iconStorageKey": p.get("icon_storage_key"),
@@ -222,6 +226,14 @@ def redeem(
         if card is None:
             raise NotFound("card not found")
         identity.require_merchant(card.merchant_id)
+        if card.program_type == SEASONAL:
+            # Applying a seasonal discount: only while the campaign is active, once.
+            program = repo.get_program(card.program_id)
+            if program is None:
+                raise NotFound("program not found")
+            require_active(program)
+            if card.state.rewards_available < 1:
+                raise DiscountAlreadyUsed("this discount has already been used")
         try:
             card.state = logic.redeem(card.state)
         except logic.RewardMechanicError as exc:

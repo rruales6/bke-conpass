@@ -52,9 +52,15 @@ log = logging.getLogger(__name__)
 # match, which is not what a merchant in Ecuador means by "this card is in Spanish".
 _LABELS: dict[str, dict[str, str]] = {
     "es": {
-        "loyalty_stamps": "Tarjeta de lealtad",
-        "loyalty_points": "Tarjeta de lealtad",
+        "loyalty_stamps": "Tarjeta de fidelización",
+        "loyalty_points": "Tarjeta de fidelización",
         "membership_pass": "Pase de membresía",
+        "seasonal_discount": "Campaña de temporada",
+        "discount": "DESCUENTO",
+        "valid": "VÁLIDA",
+        "offer": "BENEFICIO",
+        "available": "Disponible",
+        "used": "Usado",
         "stamps": "SELLOS",
         "progress": "PROGRESO",
         "points": "PUNTOS",
@@ -75,6 +81,12 @@ _LABELS: dict[str, dict[str, str]] = {
         "loyalty_stamps": "Stamp card",
         "loyalty_points": "Points card",
         "membership_pass": "Membership pass",
+        "seasonal_discount": "Seasonal offer",
+        "discount": "DISCOUNT",
+        "valid": "VALID",
+        "offer": "OFFER",
+        "available": "Available",
+        "used": "Used",
         "stamps": "STAMPS",
         "progress": "PROGRESS",
         "points": "POINTS",
@@ -83,13 +95,41 @@ _LABELS: dict[str, dict[str, str]] = {
         "status": "STATUS",
         "valid_until": "VALID UNTIL",
         "includes": "INCLUDES",
-        "reward": "PROGRAM REWARD",
+        "reward": "REWARD",
         "member": "MEMBER",
         "email": "EMAIL",
         "active": "Active",
         "no_expiry": "No expiry",
     },
 }
+
+
+_MONTHS = {
+    "es": ("ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"),
+    "en": ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"),
+}
+# Ecuador has no DST, so a fixed offset is exact (and needs no tz database on Lambda).
+_EC_OFFSET = "-05:00"
+
+
+def date_range(start: str | None, end: str | None, lang: str) -> str | None:
+    """A seasonal campaign's dates, short enough for a third-width cell.
+
+    `1–12 may` within one month, `28 abr – 12 may` across months, and the year only when
+    the range crosses one (`28 dic – 3 ene`) — the pass itself says when it expires.
+    """
+    if not start or not end:
+        return None
+    (y1, m1, d1), (y2, m2, d2) = (tuple(int(x) for x in v[:10].split("-")) for v in (start, end))
+    months = _MONTHS[lang]
+    if (y1, m1) == (y2, m2):
+        return f"{d1}–{d2} {months[m2 - 1]}" if d1 != d2 else f"{d1} {months[m1 - 1]}"
+    return f"{d1} {months[m1 - 1]} – {d2} {months[m2 - 1]}"
+
+
+def _percent(value: int, lang: str) -> str:
+    # Spanish typography puts a (thin) space before the sign; English does not.
+    return f"{value} %" if lang == "es" else f"{value}%"
 
 
 def _loc(value: str, lang: str) -> dict:
@@ -202,6 +242,16 @@ class GoogleWalletProvider(WalletProvider):
         object fills them with a placeholder.
         """
         rows = []
+        if content.program_type == "seasonal_discount":
+            # DESCUENTO · VÁLIDA · ESTADO. A campaign whose offer is text only ("2x1 en
+            # postres") has no percentage to show, so its first row drops that cell
+            # rather than print a dash — percent or not is a campaign fact, not per card.
+            rows.append(_row_three("hdr1", "hdr2", "hdr3") if content.discount_percent
+                        else _row_two("hdr2", "hdr3"))
+            if content.reward_text:
+                rows.append(_row_one("sec0"))
+            rows.append(_row_two("sec1", "sec2"))
+            return rows
         if self._has_strip(content):
             # A strip of eight dots does not fit a third of the card — observed wrapping
             # onto a second line on a real phone — so it gets the full width to itself.
@@ -212,6 +262,15 @@ class GoogleWalletProvider(WalletProvider):
             rows.append(_row_one("sec0"))
         rows.append(_row_two("sec1", "sec2"))
         return rows
+
+    @staticmethod
+    def _kicker(content: PassContent, lang: str) -> str:
+        """The small line above the title: the kind of card, plus the occasion for a
+        seasonal campaign ("Campaña de temporada · Día de la Madre")."""
+        kind = _LABELS[lang][content.program_type]
+        if content.program_type == "seasonal_discount" and content.occasion:
+            return f"{kind} · {content.occasion}"
+        return kind
 
     @staticmethod
     def _has_strip(content: PassContent) -> bool:
@@ -249,6 +308,20 @@ class GoogleWalletProvider(WalletProvider):
         def add(module_id: str, key: str, body: str | None) -> None:
             mods.append({"id": module_id, "header": label[key], "body": body or _PLACEHOLDER})
 
+        if content.program_type == "seasonal_discount":
+            if content.discount_percent:
+                add("hdr1", "discount", _percent(content.discount_percent, lang))
+            add("hdr2", "valid", date_range(content.valid_from, content.valid_until, lang))
+            # Used once and done. Before/after the dates is Google's job (validTimeInterval
+            # on the object), so this cell only ever changes on a real event — the apply.
+            add("hdr3", "status", label["used"] if content.rewards_redeemed >= 1
+                else label["available"])
+            if content.reward_text:
+                add("sec0", "offer", content.reward_text)
+            add("sec1", "member", content.holder_name)
+            add("sec2", "email", content.member_email)
+            return mods
+
         if content.program_type == "membership_pass":
             # A membership has nothing to claim, so it keeps the plain three-across row.
             add("hdr1", "status", label["active"])
@@ -284,11 +357,19 @@ class GoogleWalletProvider(WalletProvider):
             # subheader is the small kicker above the title, so it names the KIND of card
             # and the title is the programme itself. The balance is no longer squeezed in
             # here — it has its own row on the card front (D14).
-            "subheader": _loc(_LABELS[lang][content.program_type], lang),
+            "subheader": _loc(self._kicker(content, lang), lang),
             "header": _loc(content.program_name, lang),
             "barcode": {"type": "QR_CODE", "value": content.opaque_token},
             "textModulesData": self._text_modules(content),
         }
+        if (content.program_type == "seasonal_discount"
+                and content.valid_from and content.valid_until):
+            # Google shows the pass as not-yet-valid / expired on its own from these, so
+            # the card needs no push when the campaign starts or ends.
+            obj["validTimeInterval"] = {
+                "start": {"date": f"{content.valid_from[:10]}T00:00:00{_EC_OFFSET}"},
+                "end": {"date": f"{content.valid_until[:10]}T23:59:59{_EC_OFFSET}"},
+            }
         if content.accent_color and _HEX_RE.match(content.accent_color):
             obj["hexBackgroundColor"] = content.accent_color
         # No contentDescription on either image: cardTitle/header already say the same

@@ -43,7 +43,7 @@ class PassContent:
     card_id: str
     program_id: str
     merchant_id: str
-    program_type: str            # loyalty_stamps | loyalty_points | membership_pass
+    program_type: str  # loyalty_stamps | loyalty_points | membership_pass | seasonal_discount
     program_name: str
     merchant_name: str
     holder_name: str | None
@@ -58,6 +58,12 @@ class PassContent:
     reward_text: str | None = None
     membership_active_until: str | None = None
     membership_includes: str | None = None
+    # Seasonal campaign (seasonal_discount): the offer and the dates it is valid on
+    # (inclusive, ISO yyyy-mm-dd, Ecuador time). A card is used once rewards_redeemed >= 1.
+    occasion: str | None = None
+    discount_percent: int | None = None
+    valid_from: str | None = None
+    valid_until: str | None = None
     # Holder identity shown on the pass. The card's opaque token stays the QR and is
     # never printed as text — a readable id would defeat the point of the token (B6).
     member_email: str | None = None
@@ -120,6 +126,10 @@ def build_pass_content(
     which is optional — an anonymous enrollment stores no email (B6).
     """
     mu = card.get("membership_active_until")
+
+    def _iso(v):
+        return v.isoformat() if hasattr(v, "isoformat") else v
+
     return PassContent(
         card_id=str(card["id"]),
         program_id=str(program["id"]),
@@ -138,6 +148,10 @@ def build_pass_content(
         reward_text=program.get("reward"),
         membership_active_until=mu.isoformat() if hasattr(mu, "isoformat") else mu,
         membership_includes=program.get("membership_includes"),
+        occasion=program.get("occasion"),
+        discount_percent=program.get("discount_percent"),
+        valid_from=_iso(program.get("valid_from")),
+        valid_until=_iso(program.get("valid_until")),
         member_email=(customer or {}).get("email"),
         language=normalize_language(card.get("language")),
         accent_color=program.get("color"),

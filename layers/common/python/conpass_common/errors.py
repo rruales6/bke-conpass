@@ -82,3 +82,17 @@ class NotImplementedYet(AppError):
 
     def __init__(self, phase: str = "Phase 3"):
         super().__init__(f"endpoint not implemented yet ({phase})")
+
+
+class CampaignNotActive(AppError):
+    """The campaign is not `active` (upcoming / ended / disabled): nobody can enrol and
+    the cashier cannot apply its discount. details = {status, validFrom?, validUntil?}."""
+
+    status_code = 422
+    code = "campaign_not_active"
+
+
+class DiscountAlreadyUsed(Conflict):
+    """A seasonal card's single discount has already been applied."""
+
+    code = "discount_already_used"

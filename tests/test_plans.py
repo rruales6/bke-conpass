@@ -27,7 +27,7 @@ def _identity(app, monkeypatch, roles=("merchant_owner",), merchant_id=M1):
 # Catalog
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("tier,price,cards,extra,notifs,notif_rate,op_users", [
-    ("starter", "4.99", 200, "0.044", 0, None, 2),
+    ("starter", "4.99", 200, "0.044", 500, "0.015", 2),
     ("growth", "14.99", 1000, "0.034", 1000, "0.010", 5),
     ("pro", "24.99", 5000, "0.024", 10000, "0.005", None),
 ])
@@ -44,7 +44,14 @@ def test_catalog_values(tier, price, cards, extra, notifs, notif_rate, op_users)
 def test_catalog_tiers_and_features():
     assert plans.TIER_ORDER == ("starter", "growth", "pro")
     assert set(plans.PLANS) == {"starter", "growth", "pro"}
-    assert plans.PLANS["starter"].features == (plans.REPORTS, plans.USER_MANAGEMENT)
+    assert plans.PLANS["starter"].features == (
+        plans.CAMPAIGNS, plans.BASIC_NOTIFICATIONS, plans.REPORTS, plans.USER_MANAGEMENT)
+    for tier in plans.TIER_ORDER:       # seasonal + accumulation campaigns: every plan
+        assert plans.PLANS[tier].has(plans.CAMPAIGNS)
+        assert plans.PLANS[tier].has(plans.BASIC_NOTIFICATIONS)
+        plans.require_feature(tier, plans.CAMPAIGNS)
+    assert not plans.PLANS["starter"].has(plans.MANUAL_CAMPAIGNS)
+    assert not plans.PLANS["starter"].has(plans.AUTOMATED_CAMPAIGNS)
     assert plans.PLANS["growth"].has(plans.MANUAL_CAMPAIGNS)
     assert not plans.PLANS["growth"].has(plans.AUTOMATED_CAMPAIGNS)
     assert plans.PLANS["pro"].has(plans.AUTOMATED_CAMPAIGNS)
@@ -82,10 +89,13 @@ def test_estimate_notifications_overage():
     assert e.total_usd == Decimal("19.99")
     pro = plans.estimate(plans.PLANS["pro"], 0, 10100)
     assert pro.extra_notifications_usd == Decimal("0.50")
-    # Starter has no notifications: no rate, so no overage is ever billed.
-    s = plans.estimate(plans.PLANS["starter"], 0, 999)
-    assert s.extra_notifications_usd == Decimal("0.00")
-    assert s.total_usd == Decimal("4.99")
+    # Starter includes 500 and bills 0.015 beyond that.
+    s = plans.estimate(plans.PLANS["starter"], 0, 500)
+    assert s.extra_notifications == 0 and s.total_usd == Decimal("4.99")
+    s = plans.estimate(plans.PLANS["starter"], 0, 1000)
+    assert s.extra_notifications == 500
+    assert s.extra_notifications_usd == Decimal("7.50")
+    assert s.total_usd == Decimal("12.49")
 
 
 # --------------------------------------------------------------------------- #
@@ -109,7 +119,9 @@ def test_plan_to_api_omits_unlimited_and_absent():
     assert "operationUserLimit" not in pro
     assert pro["extraNotificationUsd"] == 0.005
     starter = plans.plan_to_api(plans.PLANS["starter"])
-    assert "extraNotificationUsd" not in starter
+    assert starter["extraNotificationUsd"] == 0.015
+    assert starter["includedNotifications"] == 500
+    assert starter["features"][:2] == ["campaigns", "basic_notifications"]
     assert starter["operationUserLimit"] == 2
     assert starter["priceUsd"] == 4.99 and starter["extraCardUsd"] == 0.044
 

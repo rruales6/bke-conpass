@@ -159,13 +159,18 @@ def get_demo_context():
     owner = repo.owner_profile(merchant["id"])
     if program is None or owner is None:
         raise NotFound("demo tenant is incomplete (missing program or owner)")
-    return {
+    ctx = {
         "merchantId": merchant["id"],
         "businessName": merchant["business_name"],
         "programId": program["id"],
         "ownerEmail": owner["email"],
         "ownerPassword": DEMO_PASSWORD,
     }
+    # The seeded customer's card, so the demo cashier can be pre-filled. Read-only.
+    code = repo.sample_card_code(merchant["id"], program["id"])
+    if code:
+        ctx["sampleCardCode"] = code
+    return ctx
 
 
 @app.get("/merchants/{merchant_id}")

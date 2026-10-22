@@ -391,7 +391,10 @@ paths:
       summary: Public enrollment — issue a card for a customer
       description: >
         Critical B2C path: minimal/optional PII (data minimization). Returns the
-        card with wallet add-links. Idempotent on (programId, dedupe key).
+        card with wallet add-links. Idempotent on (programId, dedupe key). Only an
+        `active` campaign (see CampaignStatus) enrols: otherwise 422 with code
+        `campaign_not_active` and details {status, validFrom?, validUntil?}. A
+        seasonal_discount card is issued with one discount available.
       security: []
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -493,6 +496,10 @@ paths:
       tags: [operations]
       operationId: redeem
       summary: Redeem a reward (idempotent, server-validated)
+      description: >
+        For seasonal_discount this APPLIES THE DISCOUNT (one use per card). It requires the
+        campaign to be `active` — otherwise 422 `campaign_not_active` with details
+        {status, validFrom, validUntil} — and a second use is 409 `discount_already_used`.
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
@@ -841,10 +848,13 @@ components:
     PlanFeature:
       type: string
       description: >
+        campaigns = seasonal + accumulation campaigns (every plan); basic_notifications =
+        basic notifications (every plan, within the plan's notification allowance);
         reports = reports + campaign dashboard; user_management = operation users;
         nearby_notifications = "Estás cerca"; manual_campaigns = personalised notifications
-        + manual campaigns; automated_campaigns = automatic birthdays / special dates.
-      enum: [reports, user_management, nearby_notifications, manual_campaigns, automated_campaigns]
+        + manual notification campaigns; automated_campaigns = seasonal campaigns and
+        birthdays that launch themselves.
+      enum: [campaigns, basic_notifications, reports, user_management, nearby_notifications, manual_campaigns, automated_campaigns]
 
     Plan:
       type: object
@@ -854,8 +864,8 @@ components:
         priceUsd: { type: number, description: Monthly subscription, USD. }
         includedCards: { type: integer, description: Active cards included per month. }
         extraCardUsd: { type: number, description: USD per active card above the inclusion. }
-        includedNotifications: { type: integer, description: Notifications included per month (0 = feature not in plan). }
-        extraNotificationUsd: { type: number, description: USD per notification above the inclusion. Absent when the plan has no notifications. }
+        includedNotifications: { type: integer, description: "Notifications included per month (every plan has some since business model v2.0: 500 / 1 000 / 10 000)." }
+        extraNotificationUsd: { type: number, description: "USD per notification above the inclusion (0.015 / 0.010 / 0.005). Absent only if a plan ever ships without notifications." }
         operationUserLimit: { type: integer, description: Absent = unlimited. }
         features:
           type: array
@@ -882,7 +892,21 @@ components:
 
     ProgramType:
       type: string
-      enum: [loyalty_stamps, loyalty_points, membership_pass]
+      description: >
+        loyalty_stamps / loyalty_points = accumulation campaigns ("campaña de acumulación":
+        collect towards a reward); seasonal_discount = seasonal campaign ("campaña de
+        temporada": a discount for a special date, usable once per customer, only while the
+        campaign is active); membership_pass = membership (unchanged).
+      enum: [loyalty_stamps, loyalty_points, membership_pass, seasonal_discount]
+
+    CampaignStatus:
+      type: string
+      description: >
+        Read-only, computed on every read. disabled = switched off by the merchant (active
+        false); upcoming / ended = a seasonal campaign before validFrom / after validUntil
+        (Ecuador time); active = otherwise. Only `active` lets a customer enrol, and (for
+        seasonal) lets the cashier apply the discount.
+      enum: [active, upcoming, ended, disabled]
 
     RewardMechanic:
       type: string
@@ -1155,6 +1179,19 @@ components:
         membershipIncludes: { type: string }
         welcomeBonus: { type: integer, default: 0 }
         expiryDays: { type: integer, description: Balance expiry window; null = no expiry. }
+        occasion: { type: string, description: "seasonal_discount: the special date it celebrates, e.g. \"Día de la Madre\"." }
+        discountPercent: { type: integer, minimum: 1, maximum: 100, description: "seasonal_discount: the discount. At least one of discountPercent / reward is required; reward is the free-text offer (\"2x1 en postres\")." }
+        validFrom: { type: string, format: date, description: "seasonal_discount (required): first day the campaign is active, inclusive, Ecuador time." }
+        validUntil: { type: string, format: date, description: "seasonal_discount (required): last day the campaign is active, inclusive, Ecuador time. Must be >= validFrom." }
+        inactivityDays:
+          type: integer
+          minimum: 1
+          maximum: 3650
+          description: >
+            Accumulation campaigns (loyalty_stamps / loyalty_points) only: a card with no
+            activity (no accrual or redemption, counted from enrolment) for this many days
+            counts as abandoned in ProgramMetrics.churnRate. Absent = 90. Ignored for
+            membership_pass. No `default:` on purpose — the handler applies 90.
         appearance: { $ref: "#/components/schemas/ProgramAppearance" }
         wallets:
           type: array
@@ -1170,6 +1207,11 @@ components:
         stampsForReward: { type: integer, minimum: 1 }
         pointsForReward: { type: integer, minimum: 1 }
         pointsPerDollar: { type: number, minimum: 0 }
+        inactivityDays: { type: integer, minimum: 1, maximum: 3650, description: See ProgramCreate.inactivityDays. }
+        occasion: { type: string, description: "seasonal_discount only. Empty string clears it." }
+        discountPercent: { type: integer, minimum: 1, maximum: 100, description: seasonal_discount only. }
+        validFrom: { type: string, format: date, description: seasonal_discount only. }
+        validUntil: { type: string, format: date, description: "seasonal_discount only. The merged row must still satisfy the ProgramCreate rules (dates present, validUntil >= validFrom, an offer)." }
         appearance: { $ref: "#/components/schemas/ProgramAppearance" }
         active: { type: boolean }
       additionalProperties: false
@@ -1183,6 +1225,7 @@ components:
             id: { type: string, format: uuid }
             merchantId: { type: string, format: uuid }
             active: { type: boolean }
+            campaignStatus: { $ref: "#/components/schemas/CampaignStatus" }
             enrollmentUrl: { type: string, format: uri }
             createdAt: { type: string, format: date-time }
 
@@ -1229,7 +1272,11 @@ components:
       additionalProperties: false
 
     Balance:
-      description: Backend-authoritative. Wallet is display-only.
+      description: >
+        Backend-authoritative. Wallet is display-only. For seasonal_discount, a card is
+        issued with rewardsAvailable 1; applying the discount moves it to rewardsRedeemed
+        (so rewardsRedeemed >= 1 means "used"). `mechanic` carries no meaning for
+        membership_pass / seasonal_discount.
       type: object
       required: [mechanic]
       properties:
@@ -1360,7 +1407,13 @@ components:
         installsThisWeek: { type: integer }
         visits: { type: integer }
         redemptions: { type: integer }
-        churnRate: { type: number, description: "% passes deleted." }
+        churnRate:
+          type: number
+          description: >
+            Abandonment rate ("tasa de abandono"): % of active cards with no activity in the
+            last `inactivityDays` days (last accrual/redemption, or enrolment if none).
+            Accumulation campaigns only — omitted for membership_pass.
+        inactivityDays: { type: integer, description: "The N used for churnRate (the program's setting, 90 when unset). Omitted for membership_pass." }
         eligibleForReminder: { type: integer, description: Customers 1 stamp/step from reward. }
       additionalProperties: false
 
@@ -1464,4 +1517,10 @@ components:
         programId: { type: string, format: uuid, description: Latest program of the demo merchant — the public enroll journey targets it. }
         ownerEmail: { type: string, format: email }
         ownerPassword: { type: string, description: "Shared demo password — intentionally public (sandbox account, demo-only data)." }
+        sampleCardCode:
+          type: string
+          description: >
+            Opaque code of the seeded demo customer's active card (preferring the one in
+            `programId`, else their most recent in any demo program), so the demo cashier
+            can be pre-filled. Demo-only data; omitted when no seeded card exists.
       additionalProperties: false

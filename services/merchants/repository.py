@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from conpass_common.db import service_client
+from conpass_common.demo import DEMO_CUSTOMER_EMAIL
 
 
 class MerchantsRepository:
@@ -53,6 +54,22 @@ class MerchantsRepository:
         rows = (self._c.table("programs").select("*").eq("merchant_id", merchant_id)
                 .eq("active", True).order("created_at", desc=True).limit(1).execute().data)
         return rows[0] if rows else None
+
+    def sample_card_code(self, merchant_id: str, program_id: str) -> str | None:
+        """Opaque token of the seeded demo customer's active card: the one in
+        `program_id` if there is one, else their most recent in any of the merchant's
+        programs. Read-only."""
+        customers = (self._c.table("customers").select("id").eq("merchant_id", merchant_id)
+                     .eq("email", DEMO_CUSTOMER_EMAIL).limit(1).execute().data)
+        if not customers:
+            return None
+        cards = (self._c.table("cards").select("program_id,opaque_token,created_at")
+                 .eq("merchant_id", merchant_id).eq("customer_id", customers[0]["id"])
+                 .eq("active", True).order("created_at", desc=True).execute().data)
+        if not cards:
+            return None
+        preferred = next((r for r in cards if r["program_id"] == program_id), cards[0])
+        return preferred["opaque_token"]
 
     def owner_profile(self, merchant_id: str) -> dict | None:
         rows = (self._c.table("profiles").select("*").eq("merchant_id", merchant_id)

@@ -2,7 +2,8 @@
 """Idempotently seed the public demo tenant (Phase 5 /demo sandbox).
 
 Creates (or repairs) one demo merchant flagged `is_demo=true`, its owner Supabase Auth
-login (fixed shared password), and a demo loyalty-stamps program. Safe to re-run: it
+login (fixed shared password), a demo loyalty-stamps program and a sample customer +
+card (pre-fills the demo cashier). Safe to re-run: it
 keys on the fixed demo owner email, so a second run just re-asserts the password/flag.
 
 Usage:  python scripts/seed_demo.py     (needs Supabase secrets)
@@ -17,11 +18,13 @@ from conpass_common.db import service_client  # noqa: E402
 from conpass_common.demo import (  # noqa: E402
     DEMO_BUSINESS_NAME,
     DEMO_COLOR,
+    DEMO_CUSTOMER_EMAIL,
     DEMO_OWNER_EMAIL,
     DEMO_PASSWORD,
     DEMO_PROGRAM_NAME,
     DEMO_REWARD,
     DEMO_STAMPS_FOR_REWARD,
+    ensure_sample_card,
 )
 from conpass_common.provisioning import provision_user  # noqa: E402
 
@@ -65,6 +68,10 @@ def main() -> None:
             "welcome_bonus": 1, "active": True,
         }).execute().data[0]
         print(f"＋ created demo program {prog['id']}")
+
+    card = ensure_sample_card(c, merchant_id)
+    if card:
+        print(f"✓ sample card ready for {DEMO_CUSTOMER_EMAIL}: {card['id']}")
 
     print(f"\ndemo ready → owner={DEMO_OWNER_EMAIL}  password={DEMO_PASSWORD}")
 

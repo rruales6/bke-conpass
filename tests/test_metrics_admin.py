@@ -114,6 +114,7 @@ def test_program_metrics_maps_view_row(monkeypatch):
         "visits": 42, "redemptions": 5, "activeInstalledPasses": 30,
         "installsThisWeek": 4, "eligibleForReminder": 3,
         "churnRate": 12.5, "secondVisitRate30d": 66.7,
+        "inactivityDays": 90,   # view row without the column -> the program's own/default
     }
 
 
@@ -135,7 +136,7 @@ def test_program_metrics_zero_fallback_when_no_row(monkeypatch):
     assert r.json() == {
         "visits": 0, "redemptions": 0, "activeInstalledPasses": 0,
         "installsThisWeek": 0, "eligibleForReminder": 0,
-        "churnRate": 0.0, "secondVisitRate30d": 0.0,
+        "churnRate": 0.0, "secondVisitRate30d": 0.0, "inactivityDays": 90,
     }
 
 

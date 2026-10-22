@@ -7,6 +7,17 @@ every plan — owner decision, Phase 13); the DB stores only the tier,
 and the PWA reads the catalog through `GET /plans`. Enterprise / white-label is quoted
 off-catalog and is deliberately not a tier.
 
+Catalog as of modelo-negocio.md v2.0 (October 2026):
+
+    tier     USD/mo  cards incl. / extra   notifications incl. / extra
+    starter    4.99     200 / 0.044            500 / 0.015
+    growth    14.99   1,000 / 0.034          1,000 / 0.010
+    pro       24.99   5,000 / 0.024         10,000 / 0.005
+
+Every plan has seasonal + accumulation campaigns (`campaigns`), reports, user
+management and basic notifications; Growth adds "Estás cerca" and manual notification
+campaigns; Pro adds automated campaigns (birthdays and special dates that fire alone).
+
 Money is `Decimal` end to end and rounded to cents only at the final figure — the
 per-card rates have three decimals (0.044), so rounding per line would drift.
 """
@@ -21,6 +32,8 @@ from conpass_common.errors import FeatureNotInPlan, NotFound
 CENT = Decimal("0.01")
 
 # Feature keys (mirror the contract's PlanFeature enum).
+CAMPAIGNS = "campaigns"                          # seasonal + accumulation, every plan
+BASIC_NOTIFICATIONS = "basic_notifications"      # every plan, within its allowance
 REPORTS = "reports"
 USER_MANAGEMENT = "user_management"
 NEARBY_NOTIFICATIONS = "nearby_notifications"
@@ -35,7 +48,7 @@ class Plan:
     included_cards: int
     extra_card_usd: Decimal
     included_notifications: int
-    extra_notification_usd: Decimal | None   # None = plan has no notifications
+    extra_notification_usd: Decimal | None   # None = no per-notification rate (no plan today)
     operation_user_limit: int | None         # None = unlimited
     features: tuple[str, ...]
 
@@ -43,7 +56,7 @@ class Plan:
         return feature in self.features
 
 
-_STARTER_FEATURES = (REPORTS, USER_MANAGEMENT)
+_STARTER_FEATURES = (CAMPAIGNS, BASIC_NOTIFICATIONS, REPORTS, USER_MANAGEMENT)
 _GROWTH_FEATURES = _STARTER_FEATURES + (NEARBY_NOTIFICATIONS, MANUAL_CAMPAIGNS)
 _PRO_FEATURES = _GROWTH_FEATURES + (AUTOMATED_CAMPAIGNS,)
 
@@ -51,7 +64,7 @@ PLANS: dict[str, Plan] = {
     "starter": Plan(
         tier="starter", price_usd=Decimal("4.99"),
         included_cards=200, extra_card_usd=Decimal("0.044"),
-        included_notifications=0, extra_notification_usd=None,
+        included_notifications=500, extra_notification_usd=Decimal("0.015"),
         operation_user_limit=2,
         features=_STARTER_FEATURES,
     ),

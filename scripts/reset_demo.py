@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Wipe demo *activity* (cards, transactions, customers) for every demo merchant, while
-keeping the merchant, program and owner login intact. Idempotent — run any time the
+keeping the merchant, program and owner login intact (and re-creating the demo
+sample customer + card). Idempotent — run any time the
 sandbox gets messy (a scheduled nightly reset can just invoke this).
 
 Usage:  python scripts/reset_demo.py     (needs Supabase secrets)
@@ -12,6 +13,7 @@ import sys
 sys.path.insert(0, "layers/common/python")
 
 from conpass_common.db import service_client  # noqa: E402
+from conpass_common.demo import ensure_sample_card  # noqa: E402
 
 
 def main() -> None:
@@ -26,6 +28,8 @@ def main() -> None:
         c.table("transactions").delete().eq("merchant_id", mid).execute()
         c.table("cards").delete().eq("merchant_id", mid).execute()
         c.table("customers").delete().eq("merchant_id", mid).execute()
+        # Re-create the sample customer/card so the demo cashier prefill keeps working.
+        ensure_sample_card(c, mid)
         print(f"↺ reset {m['business_name']} ({mid})")
 
 

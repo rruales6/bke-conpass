@@ -69,7 +69,7 @@ def test_object_payload_maps_stamps_and_appearance(provider):
     assert obj["hexBackgroundColor"] == "#0EA5E9"
     # The card names itself in the kicker and the programme is the title; the balance is
     # no longer squeezed into the title because it has its own card-front row now (D14).
-    assert obj["subheader"]["defaultValue"]["value"] == "Tarjeta de lealtad"
+    assert obj["subheader"]["defaultValue"]["value"] == "Tarjeta de fidelización"
     assert obj["header"]["defaultValue"]["value"] == "Café"
     mods = {m["id"]: (m["header"], m["body"]) for m in obj["textModulesData"]}
     assert mods["hdr0"] == ("SELLOS", "●●●○○○○○")
@@ -146,10 +146,10 @@ def test_labels_follow_the_card_language(provider):
     mods = {m["id"]: m["header"] for m in obj["textModulesData"]}
     assert mods["hdr0"] == "STAMPS" and mods["hdr1"] == "PROGRESS"
     assert mods["hdr2"] == "TO REDEEM" and mods["hdr3"] == "REDEEMED"
-    assert mods["sec0"] == "PROGRAM REWARD" and mods["sec2"] == "EMAIL"
+    assert mods["sec0"] == "REWARD" and mods["sec2"] == "EMAIL"
     # Anything unrecognised lands on Ecuador-first Spanish rather than empty labels.
-    assert provider._object_payload(
-        _content(language="pt-BR"))["subheader"]["defaultValue"]["value"] == "Tarjeta de lealtad"
+    obj = provider._object_payload(_content(language="pt-BR"))
+    assert obj["subheader"]["defaultValue"]["value"] == "Tarjeta de fidelización"
 
 
 # --- the card-front template (class-level) ----------------------------------
