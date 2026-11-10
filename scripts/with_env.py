@@ -36,6 +36,8 @@ ENV = {
     "SUPABASE_JWKS_URL": settings.supabase_jwks_url,
     "GOOGLE_WALLET_ISSUER_ID": settings.google_wallet_issuer_id,
     "GOOGLE_WALLET_SA_JSON": _sa_json_min(),
+    "SMTP_USERNAME": settings.smtp_username,
+    "SMTP_PASSWORD": settings.smtp_password,
     "AWS_REGION": settings.aws_region,
     "CONPASS_CORS_ORIGINS": ",".join(settings.cors_origins),
 }

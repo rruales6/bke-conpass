@@ -150,6 +150,52 @@ class Settings:
     def wallet_provider(self) -> str:
         return os.environ.get("CONPASS_WALLET_PROVIDER", "google")
 
+    @property
+    def email_provider(self) -> str:
+        """"stub" (default: logs only, so local runs/tests never send mail) or "smtp"."""
+        return os.environ.get("CONPASS_EMAIL_PROVIDER") or "stub"
+
+    # --- Transactional email (D18): generic SMTP, Hostinger mailbox today ---
+    # serverless.yml passes unset values as "" — treat empty strings as unset.
+    @staticmethod
+    def _nonempty(*keys: str, env: str, default: Any = None) -> Any:
+        val = _get(*keys, env=env)
+        return default if val is None or (isinstance(val, str) and not val.strip()) else val
+
+    @property
+    def smtp_host(self) -> str:
+        return self._nonempty("conpass-no-reply-sender", "host", env="SMTP_HOST",
+                              default="smtp.hostinger.com")
+
+    @property
+    def smtp_port(self) -> int:
+        return int(self._nonempty("conpass-no-reply-sender", "port", env="SMTP_PORT",
+                                  default=465))
+
+    @property
+    def smtp_username(self) -> str | None:
+        return self._nonempty("conpass-no-reply-sender", "email", env="SMTP_USERNAME")
+
+    @property
+    def smtp_password(self) -> str | None:
+        return self._nonempty("conpass-no-reply-sender", "password", env="SMTP_PASSWORD")
+
+    @property
+    def email_from_address(self) -> str:
+        return self.smtp_username or "no-reply@conpass.cards"
+
+    @property
+    def email_from_name(self) -> str:
+        return "conpass"
+
+    @property
+    def email_reply_to(self) -> str:
+        return "info@conpass.cards"
+
+    @property
+    def console_login_url(self) -> str:
+        return os.environ.get("CONPASS_CONSOLE_LOGIN_URL") or "https://console.conpass.cards/login"
+
     # --- Frontend / CORS ---
     @property
     def cors_origins(self) -> list[str]:

@@ -47,7 +47,9 @@ def test_full_loop():
         assert r.status_code == 201, r.text
         merchant_id = r.json()["merchant"]["id"]
         assert r.json()["subscription"]["includedCards"] == 1000  # growth plan from the catalog
-        assert r.json()["ownerInviteSent"] and r.json()["ownerTempPassword"]  # Phase 2
+        # Phase 15: the temp password is emailed (stub sender here), never returned.
+        assert r.json()["ownerInviteSent"] and "ownerTempPassword" not in r.json()
+        assert r.json()["ownerEmail"] == owner_email
 
         owner = _owner(merchant_id)
 

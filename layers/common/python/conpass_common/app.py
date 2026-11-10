@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -33,8 +34,26 @@ def create_app(*, service: str, version: str = "0.1.0") -> FastAPI:
     )
 
     @app.exception_handler(AppError)
-    async def _app_error(_: Request, exc: AppError):
+    async def _app_error(request: Request, exc: AppError):
+        # Logged so a refused request is diagnosable from CloudWatch. Never the body.
+        log.warning("request_refused", extra={
+            "service": service, "method": request.method, "path": request.url.path,
+            "status": exc.status_code, "code": exc.code,
+            "reason": (exc.details or {}).get("reason")})
         return JSONResponse(status_code=exc.status_code, content=exc.to_body())
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(request: Request, exc: RequestValidationError):
+        # Same Error shape as ValidationFailed. Field locations and error types only:
+        # pydantic's `input` would echo submitted values (e.g. a password).
+        fields = [{"field": ".".join(str(p) for p in e.get("loc", [])[1:]),
+                   "type": e.get("type")} for e in exc.errors()]
+        log.warning("request_refused", extra={
+            "service": service, "method": request.method, "path": request.url.path,
+            "status": 422, "code": "validation_error", "fields": fields})
+        return JSONResponse(status_code=422, content={
+            "code": "validation_error", "message": "request failed validation",
+            "details": {"reason": "invalid_fields", "fields": fields}})
 
     @app.get("/health", tags=["health"])
     async def health():

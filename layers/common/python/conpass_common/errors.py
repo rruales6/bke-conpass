@@ -32,6 +32,13 @@ class NotConfigured(AppError):
     code = "not_configured"
 
 
+class EmailDeliveryFailed(AppError):
+    """An email we had to send (e.g. credentials) was not accepted by the SMTP relay."""
+
+    status_code = 502
+    code = "email_delivery_failed"
+
+
 class Unauthorized(AppError):
     status_code = 401
     code = "unauthorized"

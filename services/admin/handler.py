@@ -3,10 +3,21 @@ from datetime import UTC, datetime
 
 from conpass_common import CurrentIdentity, create_app, lambda_handler
 from conpass_common.assets import presign_payment_proof_download, presign_payment_qr_upload
-from conpass_common.errors import NotConfigured, NotFound, ValidationFailed
+from conpass_common.config import settings
+from conpass_common.email_templates import credentials_email
+from conpass_common.errors import (
+    Conflict,
+    EmailDeliveryFailed,
+    NotConfigured,
+    NotFound,
+    ValidationFailed,
+)
 from conpass_common.models import PaymentQrUploadRequest, PaymentSettingsUpdate, SubscriptionUpdate
 from conpass_common.payment_settings import payment_settings_model
 from conpass_common.plans import TIER_ORDER, estimate, get_plan, subscription_to_api
+from conpass_common.providers import get_email_sender
+from conpass_common.providers.email import EmailDeliveryError
+from conpass_common.provisioning import get_user_language, issue_temp_password
 
 from .repository import AdminRepository
 
@@ -85,6 +96,37 @@ def update_subscription(merchant_id: str, body: SubscriptionUpdate, identity: Cu
 
     active_pass_count = repo.active_pass_count(merchant_id)
     return subscription_to_api(updated, active_pass_count)
+
+
+@app.post("/admin/clients/{merchant_id}/resend-credentials")
+def resend_credentials(merchant_id: str, identity: CurrentIdentity):
+    """Issue a fresh temporary password for the merchant owner and email it. The order
+    of checks matters: nothing touches the password until the sender is known to work."""
+    identity.require_role("platform_admin")
+    repo = get_repo()
+    merchant = repo.get_merchant(merchant_id)
+    if merchant is None:
+        raise NotFound("merchant not found")
+    if merchant.get("is_demo"):
+        raise Conflict("the demo account uses a shared password")
+    owner = repo.owner_profile(merchant_id)
+    if owner is None:
+        raise NotFound("this merchant has no owner account")
+    sender = get_email_sender()
+    if not sender.configured:
+        raise NotConfigured("email is not configured: set SMTP_USERNAME and SMTP_PASSWORD")
+
+    lang = get_user_language(owner["user_id"])
+    password = issue_temp_password(owner["user_id"])
+    try:
+        sender.send(owner["email"], *credentials_email(
+            lang, owner_name=owner.get("name") or merchant.get("contact_name"),
+            business_name=merchant["business_name"], email=owner["email"],
+            temp_password=password, login_url=settings.console_login_url, resend=True))
+    except EmailDeliveryError as exc:
+        raise EmailDeliveryFailed(
+            "the password was reset but the email could not be sent; retry") from exc
+    return {"sent": True, "email": owner["email"]}
 
 
 @app.get("/admin/clients/{merchant_id}/payment-proof")

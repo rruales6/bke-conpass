@@ -69,6 +69,27 @@ paths:
               schema: { $ref: "#/components/schemas/Identity" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /me/password:
+    post:
+      tags: [me]
+      operationId: changeMyPassword
+      summary: Set the caller's own password and clear the forced-change flag
+      description: >
+        Used on first login after a temporary password was emailed (Identity.mustChangePassword).
+        Sets the new password and clears `must_change_password` in one Supabase admin update.
+        The client must then sign in again with the new password (refresh tokens may be revoked).
+        Refused (403) for the shared demo owner.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChangePasswordRequest" }
+      responses:
+        "204": { description: Password changed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
   /demo:
     get:
       tags: [demo]
@@ -158,6 +179,9 @@ paths:
         Payment is recorded as manual proof for now (PaymentProvider stub). For the
         manual-transfer / DEUNA methods `payment.proofStorageKey` is REQUIRED — the
         account cannot be activated without a receipt for platform-admin to confirm.
+        The owner's temporary password is EMAILED to contactEmail (never returned);
+        `ownerInviteSent` is false when that email could not be sent — the account still
+        exists and platform-admin can resend credentials.
       requestBody:
         required: true
         content:
@@ -665,6 +689,30 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /admin/clients/{merchantId}/resend-credentials:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+    post:
+      tags: [admin]
+      operationId: resendOwnerCredentials
+      summary: Platform-admin — issue a new temporary password for the owner and email it
+      description: >
+        Resets the owner's password to a fresh temporary one, re-flags the forced change
+        at next login, and emails it. 409 for the demo merchant (shared password).
+        503 when email is not configured (nothing changed). 502 when the password WAS
+        reset but the email failed — retry, which issues another password.
+      responses:
+        "200":
+          description: Credentials emailed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CredentialsResent" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/EmailDeliveryFailed" }
+        "503": { $ref: "#/components/responses/NotConfigured" }
+
   /admin/payment-settings:
     patch:
       tags: [admin]
@@ -814,6 +862,16 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    NotConfigured:
+      description: A required provider is not configured on this deployment
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    EmailDeliveryFailed:
+      description: The email could not be delivered to the SMTP server (`email_delivery_failed`)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     RateLimited:
       description: Per-window fraud/rate limit hit
       content:
@@ -938,6 +996,26 @@ components:
           format: uuid
           description: Present for merchant_owner / operation_user.
         station: { type: string, description: Operation-user station label (e.g. Caja 1). }
+        mustChangePassword:
+          type: boolean
+          description: >-
+            True while the user still holds an emailed temporary password; the PWA blocks
+            every screen except the change-password page until POST /me/password succeeds.
+      additionalProperties: false
+
+    ChangePasswordRequest:
+      type: object
+      required: [newPassword]
+      properties:
+        newPassword: { type: string, minLength: 8, maxLength: 72 }
+      additionalProperties: false
+
+    CredentialsResent:
+      type: object
+      required: [sent, email]
+      properties:
+        sent: { type: boolean }
+        email: { type: string, format: email, description: Address the credentials were sent to. }
       additionalProperties: false
 
     MerchantOnboardRequest:
@@ -952,6 +1030,13 @@ components:
         contactEmail: { type: string, format: email }
         tier: { $ref: "#/components/schemas/Tier" }
         payment: { $ref: "#/components/schemas/PaymentSubmission" }
+        language:
+          type: string
+          enum: [es, en]
+          description: >-
+            UI language at signup; the credentials email is written in it (also reused by
+            admin resend). Omitted means Spanish. No OpenAPI `default` on purpose (codegen
+            would emit a bare string, not the enum member); the handler falls back.
       additionalProperties: false
 
     PaymentSubmission:
@@ -1041,17 +1126,16 @@ components:
 
     MerchantOnboardResult:
       type: object
-      required: [merchant, subscription, ownerInviteSent]
+      required: [merchant, subscription, ownerInviteSent, ownerEmail]
       properties:
         merchant: { $ref: "#/components/schemas/Merchant" }
         subscription: { $ref: "#/components/schemas/Subscription" }
-        ownerInviteSent: { type: boolean }
+        ownerInviteSent:
+          type: boolean
+          description: >-
+            True when the temporary-password email was handed to the SMTP server. False means
+            the account exists but the email failed; platform-admin can resend credentials.
         ownerEmail: { type: string, format: email, description: Login email for the owner account. }
-        ownerTempPassword:
-          type: string
-          description: >
-            Temporary password for first login (shown once on the activation screen,
-            per Función 03). The owner should change it after logging in.
       additionalProperties: false
 
     Merchant:

@@ -2,8 +2,10 @@
 
 Onboarding creates the tenant (merchant + subscription; price and limits come from the
 plan catalog), records payment through the PaymentProvider stub (D9), and provisions the owner's
-Supabase Auth login (merchant_owner role in app_metadata) — returning a temp password
-for first login (Función 03). Operators are provisioned the same way, tier-limited.
+Supabase Auth login (merchant_owner role in app_metadata) with a temporary password that
+is EMAILED to the owner (never returned in the response) and must be changed at first
+login (Función 03). Operators are provisioned the same way, tier-limited; their temp
+password is still shown in the panel.
 """
 from __future__ import annotations
 
@@ -11,8 +13,11 @@ from datetime import UTC, datetime
 
 from conpass_common import CurrentIdentity, create_app, lambda_handler
 from conpass_common.assets import presign_payment_proof_upload
+from conpass_common.config import settings
 from conpass_common.demo import DEMO_PASSWORD
+from conpass_common.email_templates import credentials_email
 from conpass_common.errors import AppError, NotConfigured, NotFound, TierLimit, ValidationFailed
+from conpass_common.logging import get_logger
 from conpass_common.models import (
     MerchantOnboardRequest,
     Method,
@@ -31,7 +36,7 @@ from conpass_common.plans import (
     plan_to_api,
     subscription_to_api,
 )
-from conpass_common.providers import get_payment_provider
+from conpass_common.providers import get_email_sender, get_payment_provider
 from conpass_common.providers.payment import PaymentIntent
 from conpass_common.provisioning import (
     delete_user,
@@ -41,6 +46,8 @@ from conpass_common.provisioning import (
 )
 
 from .repository import MerchantsRepository
+
+log = get_logger(__name__)
 
 # Manual-transfer / DEUNA payments can't be confirmed without a receipt — platform-admin
 # has nothing to check against otherwise.
@@ -130,20 +137,34 @@ def onboard_merchant(body: MerchantOnboardRequest):
 
     # Provision the owner's login (Supabase Auth user with merchant_owner role).
     # Roll back the tenant if provisioning fails (e.g. email already in use).
+    lang = body.language.value if body.language is not None else "es"
     try:
         owner = provision_user(
             email=str(body.contactEmail), roles=["merchant_owner"],
-            merchant_id=merchant["id"], name=body.contactName)
+            merchant_id=merchant["id"], name=body.contactName,
+            must_change_password=True, language=lang)
     except AppError:
         repo.delete_merchant(merchant["id"])
         raise
 
+    # Email the temp password. A delivery failure must not undo the signup: the account
+    # exists and platform-admin can resend credentials (POST /admin/clients/.../resend).
+    invite_sent = True
+    try:
+        get_email_sender().send(owner.email, *credentials_email(
+            lang, owner_name=body.contactName, business_name=body.businessName,
+            email=owner.email, temp_password=owner.temp_password,
+            login_url=settings.console_login_url))
+    except Exception as exc:  # noqa: BLE001 — EmailDeliveryError or a misconfigured sender
+        invite_sent = False
+        log.error("owner_credentials_email_failed", extra={
+            "merchant_id": merchant["id"], "error": type(exc).__name__})
+
     return {
         "merchant": _merchant_model(merchant, sub),
         "subscription": _subscription_model(sub),
-        "ownerInviteSent": True,
+        "ownerInviteSent": invite_sent,
         "ownerEmail": owner.email,
-        "ownerTempPassword": owner.temp_password,
     }
 
 

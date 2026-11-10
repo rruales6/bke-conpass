@@ -33,6 +33,7 @@ class Identity:
     roles: list[str]
     merchant_id: str | None = None
     station: str | None = None
+    must_change_password: bool = False
 
     def require_role(self, *roles: str) -> None:
         if not any(r in self.roles for r in roles):
@@ -61,6 +62,7 @@ def _claims_to_identity(claims: dict) -> Identity:
         roles=list(roles),
         merchant_id=meta.get("merchant_id"),
         station=meta.get("station"),
+        must_change_password=bool(meta.get("must_change_password")),
     )
 
 

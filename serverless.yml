@@ -32,6 +32,11 @@ provider:
     SUPABASE_JWKS_URL: ${env:SUPABASE_JWKS_URL, ""}
     GOOGLE_WALLET_ISSUER_ID: ${env:GOOGLE_WALLET_ISSUER_ID, ""}
     GOOGLE_WALLET_SA_JSON: ${env:GOOGLE_WALLET_SA_JSON, ""}
+    CONPASS_EMAIL_PROVIDER: smtp
+    SMTP_USERNAME: ${env:SMTP_USERNAME, ""}
+    SMTP_PASSWORD: ${env:SMTP_PASSWORD, ""}
+    SMTP_HOST: ${env:SMTP_HOST, ""}
+    SMTP_PORT: ${env:SMTP_PORT, ""}
     PROGRAM_ASSETS_BUCKET: conpass-program-assets-${self:provider.stage}
     PAYMENT_PROOFS_BUCKET: conpass-payment-proofs-${self:provider.stage}
   iam:
@@ -119,7 +124,12 @@ functions:
     handler: services/identity/handler.handler
     package: { patterns: ["!**", "services/identity/**"] }
     events:
-      - httpApi: { method: GET, path: /me }
+      - httpApi:
+          method: GET
+          path: /me
+      - httpApi:
+          method: POST
+          path: /me/password
 
   merchants:
     <<: *fnDefaults
@@ -247,6 +257,9 @@ functions:
       - httpApi:
           method: GET
           path: /admin/clients/{merchantId}/payment-proof
+      - httpApi:
+          method: POST
+          path: /admin/clients/{merchantId}/resend-credentials
       - httpApi:
           method: PATCH
           path: /admin/payment-settings

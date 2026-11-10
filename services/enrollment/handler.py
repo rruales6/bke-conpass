@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, timedelta
+from enum import Enum
 from typing import Annotated
 
 from conpass_common import create_app, lambda_handler
@@ -15,7 +16,7 @@ from conpass_common.campaigns import SEASONAL, STATUS_DISABLED, campaign_status,
 from conpass_common.cards import new_opaque_token
 from conpass_common.errors import NotFound, ValidationFailed
 from conpass_common.idempotency import IdempotencyStore, StoredResponse, run_idempotent
-from conpass_common.models import EnrollmentRequest, Language
+from conpass_common.models import EnrollmentRequest
 from conpass_common.providers import get_wallet_provider
 from conpass_common.providers.wallet import build_pass_content
 from fastapi import Header
@@ -37,11 +38,13 @@ def get_idempotency_store() -> IdempotencyStore:
     return IdempotencyStore()
 
 
-def _language(value: Language | str | None) -> str:
+def _language(value: Enum | str | None) -> str:
     """`language` defaults to a bare "es" string (pydantic does not validate a field's
     default value into its enum), while an explicit choice round-trips as a `Language`
     member — normalize both to the plain string the `cards.language` column stores."""
-    return value.value if isinstance(value, Language) else (value or "es")
+    # Duck-typed on purpose: codegen numbers inline enums (Language, Language1, ...) and
+    # renumbers them whenever another schema adds one, so never import it by name.
+    return value.value if isinstance(value, Enum) else (value or "es")
 
 
 def _holder_name(full_name: str | None) -> str | None:
