@@ -154,6 +154,13 @@ def _push_wallet_update(repo: OperationsRepository, card_id: str) -> None:
         log.warning("wallet update failed for card %s", card_id, exc_info=True)
 
 
+def _require_active(card: CardRow) -> None:
+    """A deactivated card (owner action, or a public-demo card past its 7 days) can neither
+    accrue nor redeem. The reason lets the cashier say so instead of a generic error."""
+    if not card.state.active:
+        raise ValidationFailed("card is inactive", details={"reason": "card_inactive"})
+
+
 def _resolve_location(identity, merchant_id: str, location_id) -> str | None:
     """The scan's locale: None when omitted (a merchant without locales); else checked
     (active, the merchant's, assigned to a cashier) — 422 propagates."""
@@ -214,6 +221,7 @@ def accrue(
         if card is None:
             raise NotFound("card not found")
         identity.require_merchant(card.merchant_id)
+        _require_active(card)
         rules = repo.get_rules(card.program_id)
         if rules is None:
             raise NotFound("program not found")
@@ -252,6 +260,7 @@ def redeem(
         if card is None:
             raise NotFound("card not found")
         identity.require_merchant(card.merchant_id)
+        _require_active(card)
         location_id = _resolve_location(identity, card.merchant_id, body.locationId)
         if card.program_type == SEASONAL:
             # Applying a seasonal discount: only while the campaign is active, once.

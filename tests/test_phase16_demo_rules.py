@@ -1,6 +1,7 @@
 """Phase 16 — anti-spam rules of the public demo merchant (is_demo)."""
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 from conpass_common import demo
@@ -210,3 +211,20 @@ def test_notifier_daily_expires_demo_cards_first(monkeypatch):
     nh.run_job("daily", object())
     assert order == ["cards", "daily", "dispatch"]
 
+
+
+def test_inactive_card_cannot_accrue_or_redeem_and_says_why(monkeypatch):
+    from dataclasses import replace
+
+    from fastapi.testclient import TestClient
+
+    from tests.test_api import CARD1, OP1, _seed_operations
+
+    h, repo = _seed_operations(monkeypatch)
+    repo.cards[CARD1].state = replace(repo.cards[CARD1].state, active=False,
+                                      rewards_available=1)
+    client = TestClient(h.app)
+    for path, body in (("/operations/accrue", {"stamps": 1}), ("/operations/redeem", {})):
+        r = client.post(path, headers={"Idempotency-Key": str(uuid.uuid4())},
+                        json={"cardId": CARD1, "operationUserId": OP1, **body})
+        assert r.status_code == 422 and r.json()["details"]["reason"] == "card_inactive"

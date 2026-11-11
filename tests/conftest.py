@@ -14,6 +14,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def _no_live_supabase(request, monkeypatch):
     if request.module.__name__.endswith("test_live_integration"):
+        yield          # a generator fixture must yield even when it does nothing
         return
     from conpass_common import db
 
@@ -30,7 +31,8 @@ def _isolate_wallet_sync(request, monkeypatch):
     those lookups return "nothing extra" and the pass is built exactly as before Phase 16.
     Tests of wallet_sync itself opt out with `@pytest.mark.real_wallet_sync` and pass a
     fake client."""
-    if request.node.get_closest_marker("real_wallet_sync"):
+    if (request.node.get_closest_marker("real_wallet_sync")
+            or request.module.__name__.endswith("test_live_integration")):
         return
     from conpass_common import wallet_sync
     from conpass_common.notify.settings import MerchantNotificationSettings
