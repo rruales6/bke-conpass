@@ -1,7 +1,7 @@
 """admin service — platform-admin, cross-tenant (Función 04). Requires platform_admin."""
 from datetime import UTC, datetime
 
-from conpass_common import CurrentIdentity, create_app, lambda_handler
+from conpass_common import CurrentIdentity, create_app, lambda_handler, wallet_sync
 from conpass_common.assets import presign_payment_proof_download, presign_payment_qr_upload
 from conpass_common.config import settings
 from conpass_common.email_templates import credentials_email
@@ -12,15 +12,23 @@ from conpass_common.errors import (
     NotFound,
     ValidationFailed,
 )
-from conpass_common.models import PaymentQrUploadRequest, PaymentSettingsUpdate, SubscriptionUpdate
+from conpass_common.logging import get_logger
+from conpass_common.models import (
+    PaymentQrUploadRequest,
+    PaymentSettingsUpdate,
+    PlatformNotificationRulesUpdate,
+    SubscriptionUpdate,
+)
+from conpass_common.notify.settings import load_platform_rules, platform_rules_model
 from conpass_common.payment_settings import payment_settings_model
-from conpass_common.plans import TIER_ORDER, estimate, get_plan, subscription_to_api
+from conpass_common.plans import TIER_ORDER, estimate, get_plan, period_start, subscription_to_api
 from conpass_common.providers import get_email_sender
 from conpass_common.providers.email import EmailDeliveryError
 from conpass_common.provisioning import get_user_language, issue_temp_password
 
 from .repository import AdminRepository
 
+log = get_logger(__name__)
 app = create_app(service="admin")
 
 # PaymentSettingsUpdate (camelCase) -> platform_payment_settings column (snake_case).
@@ -40,7 +48,12 @@ def get_repo() -> AdminRepository:
     return AdminRepository()
 
 
-def _admin_client_model(m: dict, sub: dict | None, active_cards: int = 0) -> dict:
+def _notifications_by_merchant(repo: AdminRepository) -> dict[str, int]:
+    return repo.notifications_by_merchant(period_start(datetime.now(UTC).date()))
+
+
+def _admin_client_model(m: dict, sub: dict | None, active_cards: int = 0,
+                        notifications: int = 0) -> dict:
     out = {
         "merchantId": m["id"], "name": m["business_name"], "city": m.get("city"),
         "tier": sub["tier"] if sub else None,
@@ -49,8 +62,7 @@ def _admin_client_model(m: dict, sub: dict | None, active_cards: int = 0) -> dic
     }
     if sub:
         plan = get_plan(sub["tier"])
-        # Notifications are not metered yet (stub service) -> 0.
-        est = estimate(plan, active_cards, 0)
+        est = estimate(plan, active_cards, notifications)
         out["priceUsd"] = float(plan.price_usd)
         out["activeCards"] = active_cards
         out["includedCards"] = plan.included_cards
@@ -75,7 +87,9 @@ def list_clients(identity: CurrentIdentity):
     merchants = repo.list_merchants()
     subs_by_merchant = {s["merchant_id"]: s for s in repo.list_subscriptions()}
     active = repo.active_card_counts()   # one query for every merchant (no N+1)
-    return [_admin_client_model(m, subs_by_merchant.get(m["id"]), active.get(m["id"], 0))
+    notifs = _notifications_by_merchant(repo)
+    return [_admin_client_model(m, subs_by_merchant.get(m["id"]), active.get(m["id"], 0),
+                                notifs.get(m["id"], 0))
             for m in merchants]
 
 
@@ -87,12 +101,20 @@ def update_subscription(merchant_id: str, body: SubscriptionUpdate, identity: Cu
     if existing is None:
         raise NotFound("subscription not found")
 
+    previous_tier = existing.get("tier")
     patch: dict = {}
     if body.tier is not None:
         patch["tier"] = body.tier.value
     if body.paymentStatus is not None:
         patch["payment_status"] = body.paymentStatus.value
     updated = repo.update_subscription(merchant_id, patch) if patch else existing
+    if "tier" in patch and patch["tier"] != previous_tier:
+        # Nearby locations on the wallet classes depend on the plan (Growth+).
+        try:
+            wallet_sync.sync_merchant_classes(repo.client, merchant_id)
+        except Exception as exc:  # noqa: BLE001 - the plan change itself already succeeded
+            log.warning("sync_merchant_classes_failed", extra={
+                "merchant_id": merchant_id, "error": type(exc).__name__})
 
     active_pass_count = repo.active_pass_count(merchant_id)
     return subscription_to_api(updated, active_pass_count)
@@ -174,7 +196,9 @@ def get_platform_stats(identity: CurrentIdentity):
     active = repo.active_card_counts()
     paid = [s for s in subs if s.get("payment_status") == "paid"]
     subscription_mrr = sum(get_plan(s["tier"]).price_usd for s in paid)
-    mrr = sum(estimate(get_plan(s["tier"]), active.get(s["merchant_id"], 0), 0).total_usd
+    notifs = _notifications_by_merchant(repo)
+    mrr = sum(estimate(get_plan(s["tier"]), active.get(s["merchant_id"], 0),
+                       notifs.get(s["merchant_id"], 0)).total_usd
               for s in paid)
     return {
         "activeClients": len(paid),
@@ -183,6 +207,29 @@ def get_platform_stats(identity: CurrentIdentity):
         "tierCounts": {t: sum(1 for s in subs if s.get("tier") == t) for t in TIER_ORDER},
         "overdueCount": sum(1 for s in subs if s.get("payment_status") == "overdue"),
     }
+
+
+@app.get("/admin/notification-rules")
+def get_notification_rules(identity: CurrentIdentity):
+    identity.require_role("platform_admin")
+    return platform_rules_model(load_platform_rules(get_repo().client))
+
+
+@app.patch("/admin/notification-rules")
+def update_notification_rules(body: PlatformNotificationRulesUpdate, identity: CurrentIdentity):
+    """Partial: only the fields sent change (the singleton row, id = true)."""
+    identity.require_role("platform_admin")
+    repo = get_repo()
+    sent = body.model_dump(exclude_unset=True, exclude_none=True)
+    patch = {}
+    if "capPerDay" in sent:
+        patch["cap_per_day"] = sent["capPerDay"]
+    if "quietHoursEnabled" in sent:
+        patch["quiet_hours_enabled"] = sent["quietHoursEnabled"]
+    if patch:
+        patch["updated_at"] = datetime.now(UTC).isoformat()
+        repo.update_notification_rules(patch)
+    return platform_rules_model(load_platform_rules(repo.client))
 
 
 handler = lambda_handler(app)

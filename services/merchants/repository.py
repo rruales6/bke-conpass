@@ -3,11 +3,17 @@ from __future__ import annotations
 
 from conpass_common.db import service_client
 from conpass_common.demo import DEMO_CUSTOMER_EMAIL
+from conpass_common.usage import notifications_used
 
 
 class MerchantsRepository:
     def __init__(self, client=None):
         self._c = client or service_client()
+
+    @property
+    def client(self):
+        """The Data API client, for shared helpers that take one (wallet_sync, usage)."""
+        return self._c
 
     # --- merchant + subscription ---
     def create_merchant(self, data: dict) -> dict:
@@ -108,3 +114,47 @@ class MerchantsRepository:
         res = self._c.table("programs").select("id", count="exact").eq(
             "merchant_id", merchant_id).execute()
         return res.count or 0
+
+    def notifications_used(self, merchant_id: str, since) -> int:
+        return notifications_used(self._c, merchant_id, since)
+
+    # --- locales (Phase 16) ---
+    def list_locations(self, merchant_id: str) -> list[dict]:
+        return (self._c.table("merchant_locations").select("*")
+                .eq("merchant_id", merchant_id).order("created_at").execute().data or [])
+
+    def get_location(self, merchant_id: str, location_id: str) -> dict | None:
+        rows = (self._c.table("merchant_locations").select("*").eq("id", location_id)
+                .eq("merchant_id", merchant_id).limit(1).execute().data)
+        return rows[0] if rows else None
+
+    def create_location(self, data: dict) -> dict:
+        return self._c.table("merchant_locations").insert(data).execute().data[0]
+
+    def update_location(self, merchant_id: str, location_id: str, patch: dict) -> dict:
+        return (self._c.table("merchant_locations").update(patch).eq("id", location_id)
+                .eq("merchant_id", merchant_id).execute().data[0])
+
+    def delete_location(self, merchant_id: str, location_id: str) -> None:
+        (self._c.table("merchant_locations").delete().eq("id", location_id)
+         .eq("merchant_id", merchant_id).execute())
+
+    def count_active_locations(self, merchant_id: str) -> int:
+        res = (self._c.table("merchant_locations").select("id", count="exact")
+               .eq("merchant_id", merchant_id).eq("active", True).execute())
+        return res.count or 0
+
+    def location_assignments(self, merchant_id: str) -> list[dict]:
+        """operation_user_locations rows ({user_id, location_id}) for the merchant's locales."""
+        ids = [r["id"] for r in self.list_locations(merchant_id)]
+        if not ids:
+            return []
+        return (self._c.table("operation_user_locations").select("user_id,location_id")
+                .in_("location_id", ids).execute().data or [])
+
+    def set_operation_user_locations(self, user_id: str, location_ids: list[str]) -> None:
+        """Replace the cashier's set (empty clears it)."""
+        self._c.table("operation_user_locations").delete().eq("user_id", user_id).execute()
+        if location_ids:
+            self._c.table("operation_user_locations").insert(
+                [{"user_id": user_id, "location_id": lid} for lid in location_ids]).execute()

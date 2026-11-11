@@ -172,6 +172,18 @@ functions:
       - httpApi:
           method: POST
           path: /merchants/{merchantId}/operation-users/{operationUserId}/reset-password
+      - httpApi:              # Phase 16 — locales
+          method: GET
+          path: /merchants/{merchantId}/locations
+      - httpApi:
+          method: POST
+          path: /merchants/{merchantId}/locations
+      - httpApi:
+          method: PATCH
+          path: /merchants/{merchantId}/locations/{locationId}
+      - httpApi:
+          method: DELETE
+          path: /merchants/{merchantId}/locations/{locationId}
 
   programs:
     <<: *fnDefaults
@@ -269,13 +281,42 @@ functions:
       - httpApi:
           method: GET
           path: /admin/stats
+      - httpApi:              # Phase 16 — platform sending rules
+          method: GET
+          path: /admin/notification-rules
+      - httpApi:
+          method: PATCH
+          path: /admin/notification-rules
 
   notifications:
     <<: *fnDefaults
     handler: services/notifications/handler.handler
     package: { patterns: ["!**", "services/notifications/**"] }
     events:
-      - httpApi: { method: POST, path: /notifications/reminders }
+      - httpApi: { method: GET, path: /notifications/settings }
+      - httpApi: { method: PUT, path: /notifications/settings }
+      - httpApi: { method: GET, path: /notifications/audiences }
+      - httpApi: { method: GET, path: /notifications }
+      - httpApi: { method: POST, path: /notifications }
+      - httpApi:
+          method: DELETE
+          path: /notifications/{notificationId}
+
+  # Phase 16 — outbox dispatcher + daily automations. No HTTP: EventBridge only.
+  notifier:
+    <<: *fnDefaults
+    handler: services/notifier/handler.handler
+    package: { patterns: ["!**", "services/notifier/**"] }
+    timeout: 300
+    # No reservedConcurrency: the account's limit is 10 and AWS keeps 10 unreserved.
+    # Overlapping runs are safe — claim_notification_deliveries uses SKIP LOCKED.
+    events:
+      - schedule:
+          rate: rate(1 minute)
+          input: { job: dispatch }
+      - schedule:
+          rate: cron(0 13 * * ? *)   # 08:00 Ecuador (UTC-5, no DST)
+          input: { job: daily }
 
 resources:
   Resources:

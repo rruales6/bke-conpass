@@ -7,6 +7,7 @@ requires it, which admin does not).
 from __future__ import annotations
 
 from conpass_common.db import service_client
+from conpass_common.usage import notifications_used_by_merchant
 
 
 class AdminRepository:
@@ -54,3 +55,15 @@ class AdminRepository:
     def update_payment_settings(self, patch: dict) -> dict:
         return (self._c.table("platform_payment_settings").update(patch)
                 .eq("id", True).execute().data[0])
+
+    def notifications_by_merchant(self, since) -> dict[str, int]:
+        """merchant_id -> pushes delivered since `since` (billing overage in estimates)."""
+        return notifications_used_by_merchant(self._c, since)
+
+    # --- platform notification rules (singleton, id = true) ---
+    def update_notification_rules(self, patch: dict) -> None:
+        self._c.table("platform_notification_rules").update(patch).eq("id", True).execute()
+
+    @property
+    def client(self):
+        return self._c

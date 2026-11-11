@@ -404,6 +404,8 @@ def test_claims_parse_must_change_password():
 
 def test_me_includes_must_change_password(monkeypatch):
     import services.identity.handler as h
+    monkeypatch.setattr(h, "identity_locations", lambda *_a: [])
+    monkeypatch.setattr(h, "service_client", lambda: None)
     monkeypatch.setitem(h.app.dependency_overrides, require_identity, lambda: Identity(
         user_id=U1, email="a@b.co", roles=["merchant_owner"], must_change_password=True))
     assert TestClient(h.app).get("/me").json()["mustChangePassword"] is True

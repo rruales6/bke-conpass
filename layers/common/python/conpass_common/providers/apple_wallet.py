@@ -33,5 +33,8 @@ class AppleWalletProvider(WalletProvider):
     def add_link(self, content: PassContent) -> str:
         self._unconfigured()
 
+    def send_message(self, content: PassContent, message, *, notify: bool = True) -> None:
+        self._unconfigured()
+
     def sync_program(self, content: PassContent) -> None:
         self._unconfigured()

@@ -36,6 +36,33 @@ class WalletKind(StrEnum):
 
 
 @dataclass(frozen=True)
+class PassMessage:
+    """A message on the back of the pass (Phase 16).
+
+    `id` is stable (the outbox delivery id) so re-sending the same message on a full
+    object PUT never duplicates it. `display_until` (aware datetime, optional) makes the
+    wallet hide it on its own — flash sales and events.
+    """
+
+    id: str
+    header: str
+    body: str
+    url: str | None = None
+    display_until: object | None = None   # datetime | None (kept loose: no import cycle)
+
+
+class WalletObjectMissing(Exception):
+    """The card has no pass in the vendor's wallet (never issued there — e.g. the
+    customer never tapped "Add to wallet" and the pre-creation failed). Retrying cannot
+    help, so the dispatcher skips it."""
+
+
+class WalletQuotaExceeded(Exception):
+    """The vendor refused a notifying message: the pass already got its daily maximum
+    (Google: 3 per 24 h). The caller may retry later or send it silently."""
+
+
+@dataclass(frozen=True)
 class PassContent:
     """Vendor-neutral description of what a card shows. Providers translate this
     into their own object model (Google loyalty/generic object, Apple .pkpass)."""
@@ -73,6 +100,14 @@ class PassContent:
     accent_color: str | None = None
     logo_url: str | None = None
     background_url: str | None = None
+    # Phase 16 — notifications:
+    level: int | None = None                 # loyalty: 1 + rewards ever reached
+    balance_expires_on: str | None = None    # ISO date the balance expires (inactivity)
+    messages: tuple[PassMessage, ...] = ()   # back-of-pass messages, newest first (DB-derived)
+    # Nearby points. None = leave the vendor's current value alone is NOT supported by a
+    # full PUT, so callers always pass the real list ([] = none / plan without nearby).
+    merchant_locations: tuple[tuple[float, float], ...] = ()   # program/class level, <= 10
+    card_locations: tuple[tuple[float, float], ...] = ()       # per card/object, <= 10
     extra: dict = field(default_factory=dict)
 
 
@@ -106,6 +141,13 @@ class WalletProvider(ABC):
         """Return (or regenerate) the add-to-wallet link without mutating state."""
 
     @abstractmethod
+    def send_message(self, content: PassContent, message: PassMessage, *,
+                     notify: bool = True) -> None:
+        """Add `message` to the back of an issued pass; with `notify`, also push it to the
+        holder's lock screen. Raises WalletQuotaExceeded when the vendor's per-pass
+        notification limit is hit."""
+
+    @abstractmethod
     def sync_program(self, content: PassContent) -> None:
         """Refresh the vendor's PROGRAM-level template from the program's own state.
 
@@ -115,7 +157,8 @@ class WalletProvider(ABC):
 
 
 def build_pass_content(
-    card: dict, program: dict, merchant: dict | None, customer: dict | None = None
+    card: dict, program: dict, merchant: dict | None, customer: dict | None = None,
+    **extra_fields,
 ) -> PassContent:
     """Map canonical DB rows (cards/programs/merchants/customers) → a vendor-neutral
     PassContent.
@@ -157,4 +200,7 @@ def build_pass_content(
         accent_color=program.get("color"),
         logo_url=public_asset_url(program.get("icon_storage_key")),
         background_url=public_asset_url(program.get("background_storage_key")),
+        level=(1 + (card.get("rewards_available") or 0) + (card.get("rewards_redeemed") or 0)
+               if program["type"] in ("loyalty_stamps", "loyalty_points") else None),
+        **extra_fields,   # Phase 16: messages / locations / balance_expires_on (wallet_sync)
     )

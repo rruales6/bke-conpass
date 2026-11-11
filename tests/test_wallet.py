@@ -337,7 +337,10 @@ def test_save_link_embeds_the_full_object(provider):
     assert obj["cardTitle"]["defaultValue"]["value"] == "Conpass QA"
     assert obj["hexBackgroundColor"] == "#0EA5E9"
     # identical to what the REST call would have created — one payload builder, no drift
-    assert obj == provider._object_payload(_content())
+    # The URL form drops the DB-derived lists (empty on a new card; re-applied by REST).
+    full = provider._object_payload(_content())
+    assert full.pop("messages") == [] and full.pop("merchantLocations") == []
+    assert obj == full
 
 
 def test_save_link_without_images_embeds_and_fits(provider):
@@ -469,6 +472,9 @@ class _FakeQuery:
     def eq(self, *_):
         return self
 
+    def limit(self, *_):
+        return self
+
     def execute(self):
         return type("R", (), {"data": self._rows})()
 
@@ -492,7 +498,7 @@ def test_cards_wallet_links(monkeypatch):
         "merchants": [{"id": M1, "business_name": "Conpass QA"}],
     }
     monkeypatch.setattr(h, "service_client", lambda: _FakeClient(tables))
-    monkeypatch.setattr(h, "get_wallet_provider", lambda: _FakeProvider())
+    monkeypatch.setattr("conpass_common.wallet_sync.get_wallet_provider", lambda: _FakeProvider())
     _identity(h.app, monkeypatch)
     r = TestClient(h.app).get(f"/cards/{CARD1}/wallet-links")
     assert r.status_code == 200

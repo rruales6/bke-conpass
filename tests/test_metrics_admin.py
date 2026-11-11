@@ -57,6 +57,10 @@ class _FakeQuery:
         self._rows = self._rows[:n]
         return self
 
+    def range(self, lo, hi):
+        self._rows = self._rows[lo:hi + 1]
+        return self
+
     def update(self, patch):
         self._patch = patch
         return self

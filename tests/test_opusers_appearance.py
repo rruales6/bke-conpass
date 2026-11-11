@@ -36,6 +36,9 @@ class _FakeMerchantsRepo:
     def delete_operation_user_profile(self, merchant_id, user_id):
         self.deleted_profile = (merchant_id, user_id)
 
+    def location_assignments(self, merchant_id):
+        return []
+
 
 def _seed_merchants(monkeypatch, op_user=None):
     import services.merchants.handler as h
@@ -57,7 +60,8 @@ def test_edit_operation_user_merges_fields(monkeypatch):
         f"/merchants/{M1}/operation-users/{OP}", json={"station": "caja_2"})
     assert resp.status_code == 200
     body = resp.json()
-    assert body == {"id": OP, "name": "Lucía Mora", "email": "lucia@x.co", "station": "caja_2"}
+    assert body == {"id": OP, "name": "Lucía Mora", "email": "lucia@x.co", "station": "caja_2",
+                    "locationIds": []}
     assert calls["uid"] == OP and calls["station"] == "caja_2"
 
 

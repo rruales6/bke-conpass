@@ -1,11 +1,9 @@
 """cards service — read a card & (re)generate wallet links."""
 from __future__ import annotations
 
-from conpass_common import CurrentIdentity, create_app, lambda_handler
+from conpass_common import CurrentIdentity, create_app, lambda_handler, wallet_sync
 from conpass_common.db import service_client
 from conpass_common.errors import NotFound
-from conpass_common.providers import get_wallet_provider
-from conpass_common.providers.wallet import build_pass_content
 
 app = create_app(service="cards")
 
@@ -54,21 +52,11 @@ def get_wallet_links(card_id: str, identity: CurrentIdentity):
     card = cards[0]
     identity.require_merchant(card["merchant_id"])
 
-    programs = client.table("programs").select("*").eq(
-        "id", card["program_id"]).execute().data
-    if not programs:
+    # wallet_sync builds the pass from rows (same object the REST writes carry).
+    link = wallet_sync.card_add_link(client, card_id)
+    if link is None:
         raise NotFound("program not found")
-    merchants = client.table("merchants").select("*").eq(
-        "id", card["merchant_id"]).execute().data
-    customer = None
-    if card.get("customer_id"):
-        customers = client.table("customers").select("*").eq(
-            "id", card["customer_id"]).execute().data
-        customer = customers[0] if customers else None
-
-    content = build_pass_content(card, programs[0], merchants[0] if merchants else None,
-                                 customer)
-    return {"google": get_wallet_provider().add_link(content)}
+    return {"google": link}
 
 
 handler = lambda_handler(app)

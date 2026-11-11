@@ -156,6 +156,17 @@ class _Q:
         self._rows = [r for r in self._rows if r.get(col) == val]
         return self
 
+    def gte(self, col, val):
+        self._rows = [r for r in self._rows if r.get(col) is not None and r[col] >= val]
+        return self
+
+    def order(self, *_a, **_k):
+        return self
+
+    def range(self, lo, hi):
+        self._rows = self._rows[lo:hi + 1]
+        return self
+
     def execute(self):
         return type("R", (), {"data": self._rows, "count": len(self._rows)})()
 
@@ -169,8 +180,9 @@ class _Client:
 
 
 class _MerchantsRepo:
-    def __init__(self, tier="starter", active=0, programs=0, op_users=0):
+    def __init__(self, tier="starter", active=0, programs=0, op_users=0, notifications=0):
         self.tier, self.active, self.programs, self.op_users = tier, active, programs, op_users
+        self.notifications = notifications
 
     def get_subscription(self, merchant_id):
         return {"merchant_id": merchant_id, "tier": self.tier, "payment_status": "paid"}
@@ -183,6 +195,9 @@ class _MerchantsRepo:
 
     def count_operation_users(self, merchant_id):
         return self.op_users
+
+    def notifications_used(self, merchant_id, since):
+        return self.notifications
 
 
 def _merchants(monkeypatch, **kw):
@@ -289,22 +304,17 @@ def _gate(monkeypatch, module, tier):
 
 
 def test_notifications_gating(monkeypatch):
+    """Manual sends: general->all is every plan; segments/event/flash/link are Growth+."""
     from services.notifications import handler as h
 
     _gate(monkeypatch, h, "starter")
     c = TestClient(h.app)
-    r = c.post("/notifications/reminders", json={"programId": P1})
+    r = c.post("/notifications", json={"type": "flash", "audience": "all", "body": "x",
+                                       "flashHours": 2})
     assert r.status_code == 402 and r.json()["code"] == "feature_not_in_plan"
     assert r.json()["details"]["requiredTier"] == "growth"
-
-    _gate(monkeypatch, h, "growth")
-    assert c.post("/notifications/reminders", json={"programId": P1}).status_code == 501
-    r = c.post("/notifications/reminders", json={"programId": P1, "segment": "birthday"})
-    assert r.status_code == 402 and r.json()["details"]["requiredTier"] == "pro"
-
-    _gate(monkeypatch, h, "pro")
-    r = c.post("/notifications/reminders", json={"programId": P1, "segment": "birthday"})
-    assert r.status_code == 501
+    r = c.post("/notifications", json={"type": "general", "audience": "near", "body": "x"})
+    assert r.status_code == 402
 
 
 def test_birthday_gating(monkeypatch):

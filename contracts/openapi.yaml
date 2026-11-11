@@ -36,7 +36,9 @@ tags:
   - name: admin
     description: Platform-admin (cross-tenant). Service:admin
   - name: notifications
-    description: Push reminders (stubbed). Service:notifications
+    description: >-
+      Wallet notifications — automations, manual sends, audiences, history (Phase 16).
+      Service:notifications (HTTP) + notifier (scheduled dispatcher, no HTTP).
 
 security:
   - supabaseJwt: []
@@ -223,7 +225,7 @@ paths:
         Two-layer pricing (D17) — subscription + consumption. Active cards are a LEVEL
         metric (cards currently active, counted now), billed above the plan's inclusion
         at the plan's per-card rate. Notifications are counted per calendar month
-        (always 0 until notifications ship). The figure is an ESTIMATE for the manual
+        (push-delivered wallet notifications). The figure is an ESTIMATE for the manual
         billing workflow, not a charge. merchant_owner of that merchant, or platform_admin.
       responses:
         "200":
@@ -767,26 +769,223 @@ paths:
               schema: { $ref: "#/components/schemas/PlatformStats" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
-  /notifications/reminders:
-    post:
-      tags: [notifications]
-      operationId: sendReminder
-      summary: Send a push reminder to eligible customers (stubbed provider)
+  /merchants/{merchantId}/locations:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+    get:
+      tags: [merchants]
+      operationId: listLocations
+      summary: The merchant's locales (stores) — every plan
       description: >
-        A manual campaign — Growth and Pro (feature `manual_campaigns`); Starter gets 402
-        `feature_not_in_plan`. segment `birthday` is an automated campaign → Pro only.
+        Locales serve two purposes: the cashier picks one at scan time (so visits are
+        attributed to a store), and up to 10 ACTIVE ones are sent to every program's
+        wallet class as nearby-notification points — that second part only on plans with
+        `nearby_notifications` (Growth+); on Starter they are stored and activate on upgrade.
+      responses:
+        "200":
+          description: Locales, oldest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Location" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [merchants]
+      operationId: createLocation
+      summary: Register a locale (name + decimal latitude/longitude)
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/ReminderRequest" }
+            schema: { $ref: "#/components/schemas/LocationCreate" }
       responses:
-        "202":
-          description: Accepted (queued)
+        "201":
+          description: Created
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/ReminderResult" }
+              schema: { $ref: "#/components/schemas/Location" }
+        "409":
+          description: >-
+            Would exceed 10 active locales (details.reason = active_location_limit). Create
+            it with active=false, or pause another first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /merchants/{merchantId}/locations/{locationId}:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+      - $ref: "#/components/parameters/LocationId"
+    patch:
+      tags: [merchants]
+      operationId: updateLocation
+      summary: Edit / pause / resume a locale
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LocationUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Location" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Activating it would exceed 10 active locales (details.reason = active_location_limit).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    delete:
+      tags: [merchants]
+      operationId: deleteLocation
+      summary: Delete a locale (past visits keep their history, unattributed)
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /notifications/settings:
+    get:
+      tags: [notifications]
+      operationId: getNotificationSettings
+      summary: The merchant's automations, balance-expiry window and per-card locations
+      description: >
+        Returns defaults when the merchant never saved settings. `platformRules` is
+        read-only here (platform-admin sets it) and applies to automations and manual sends.
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationSettings" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    put:
+      tags: [notifications]
+      operationId: updateNotificationSettings
+      summary: Save automations, balance-expiry window and per-card locations
+      description: >
+        Full replace. Enabling `inactive` needs `automated_campaigns` (Pro) → 402
+        feature_not_in_plan. `expiry.enabled` with `balanceExpiryDays` null is accepted and
+        inert (nothing expires, nothing is warned). warnDays not below balanceExpiryDays → 422.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NotificationSettingsUpdate" }
+      responses:
+        "200":
+          description: Saved
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationSettings" }
         "402": { $ref: "#/components/responses/TierLimit" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /notifications/audiences:
+    get:
+      tags: [notifications]
+      operationId: getNotificationAudiences
+      summary: How many cards each manual-send audience reaches right now
+      responses:
+        "200":
+          description: Counts
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationAudiences" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /notifications:
+    get:
+      tags: [notifications]
+      operationId: listNotifications
+      summary: History — manual sends and daily automation batches, newest first
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        "200":
+          description: History
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Notification" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [notifications]
+      operationId: createNotification
+      summary: Send (or schedule) a manual notification to an audience
+      description: >
+        Every plan may send `general` to `all`, without a link. `event`, `flash`, any other
+        audience and `url` need `manual_campaigns` (Growth+) → 402 feature_not_in_plan.
+        Delivery is asynchronous: the dispatcher applies the platform rules (daily cap per
+        card, quiet hours) and pushes within about a minute. Notifications above the plan's
+        inclusion are billed, never blocked (D17).
+        **Public demo merchant** (is_demo): at most 3 manual sends per Ecuador day (any
+        status, scheduled or cancelled included) → 429 `rate_limited` with
+        details.reason = demo_daily_limit; its cards are deactivated 7 days after
+        enrolment, so only recent demo cards receive anything; automations never run.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NotificationCreate" }
+      responses:
+        "202":
+          description: Accepted — queued, or scheduled when scheduledAt is in the future
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Notification" }
+        "402": { $ref: "#/components/responses/TierLimit" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /notifications/{notificationId}:
+    parameters:
+      - $ref: "#/components/parameters/NotificationId"
+    delete:
+      tags: [notifications]
+      operationId: cancelNotification
+      summary: Cancel a scheduled notification that has not started sending
+      responses:
+        "204": { description: Cancelled }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /admin/notification-rules:
+    get:
+      tags: [admin]
+      operationId: getNotificationRules
+      summary: Platform-admin — sending rules applied to every merchant
+      responses:
+        "200":
+          description: Rules
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformNotificationRules" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    patch:
+      tags: [admin]
+      operationId: updateNotificationRules
+      summary: Platform-admin — change the daily cap per card and quiet hours
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlatformNotificationRulesUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformNotificationRules" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
 
 components:
   securitySchemes:
@@ -814,6 +1013,16 @@ components:
       schema: { type: string, format: uuid }
     OperationUserId:
       name: operationUserId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    LocationId:
+      name: locationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    NotificationId:
+      name: notificationId
       in: path
       required: true
       schema: { type: string, format: uuid }
@@ -939,7 +1148,7 @@ components:
         activeCards: { type: integer, description: Cards currently active (billing metric). }
         extraCards: { type: integer, description: max(0, activeCards - plan.includedCards). }
         extraCardsUsd: { type: number }
-        notificationsUsed: { type: integer, description: This calendar month. 0 until notifications ship. }
+        notificationsUsed: { type: integer, description: "Wallet notifications delivered with a push this calendar month (UTC) — the billed figure." }
         extraNotifications: { type: integer }
         extraNotificationsUsd: { type: number }
         estimatedTotalUsd: { type: number, description: plan.priceUsd + both overages, rounded to cents. }
@@ -996,6 +1205,13 @@ components:
           format: uuid
           description: Present for merchant_owner / operation_user.
         station: { type: string, description: Operation-user station label (e.g. Caja 1). }
+        locations:
+          type: array
+          items: { $ref: "#/components/schemas/LocationRef" }
+          description: >-
+            Active locales this user may scan at — an operation user's assigned ones, every
+            active locale for the owner. Empty when the merchant registered none; the
+            cashier screen asks for one only when there are two or more.
         mustChangePassword:
           type: boolean
           description: >-
@@ -1177,12 +1393,16 @@ components:
 
     OperationUser:
       type: object
-      required: [id, name, email, station]
+      required: [id, name, email, station, locationIds]
       properties:
         id: { type: string, format: uuid }
         name: { type: string }
         email: { type: string, format: email }
         station: { type: string, enum: [caja_1, caja_2, door_access] }
+        locationIds:
+          type: array
+          items: { type: string, format: uuid }
+          description: Locales this cashier may work at (empty = none assigned).
         tempPassword:
           type: string
           description: Temporary password, returned only when the operator is first created.
@@ -1195,6 +1415,10 @@ components:
         name: { type: string }
         email: { type: string, format: email }
         station: { type: string, enum: [caja_1, caja_2, door_access] }
+        locationIds:
+          type: array
+          items: { type: string, format: uuid }
+          description: Locales this cashier may work at (owner decision, Phase 16). Replaces the set when sent.
       additionalProperties: false
 
     OperationUserUpdate:
@@ -1203,6 +1427,10 @@ components:
         name: { type: string }
         email: { type: string, format: email }
         station: { type: string, enum: [caja_1, caja_2, door_access] }
+        locationIds:
+          type: array
+          items: { type: string, format: uuid }
+          description: Locales this cashier may work at (owner decision, Phase 16). Replaces the set when sent.
       additionalProperties: false
 
     OperationUserPasswordReset:
@@ -1326,6 +1554,12 @@ components:
         dedupeKey:
           type: string
           description: Optional client key to dedupe repeat submissions from the same device.
+        locationId:
+          type: string
+          format: uuid
+          description: >-
+            Locale the customer signed up at (enrol link `?local=<id>`). Ignored when it is
+            not an active locale of the program's merchant — never fails the enrolment.
         language:
           type: string
           enum: [es, en]
@@ -1416,6 +1650,13 @@ components:
           type: string
           format: date-time
           description: Client timestamp of the in-store event (for offline replay ordering).
+        locationId:
+          type: string
+          format: uuid
+          description: >-
+            Locale the scan happens at. Must be an active locale of the card's merchant and,
+            for an operation user, one assigned to them (else 422). Optional — omitted when
+            the merchant has no locales.
       additionalProperties: false
 
     RedeemRequest:
@@ -1425,6 +1666,13 @@ components:
         cardId: { type: string, format: uuid }
         operationUserId: { type: string, format: uuid }
         occurredAt: { type: string, format: date-time }
+        locationId:
+          type: string
+          format: uuid
+          description: >-
+            Locale the scan happens at. Must be an active locale of the card's merchant and,
+            for an operation user, one assigned to them (else 422). Optional — omitted when
+            the merchant has no locales.
       additionalProperties: false
 
     ValidateAccessRequest:
@@ -1455,6 +1703,7 @@ components:
         stampsDelta: { type: integer }
         pointsDelta: { type: integer }
         operationUserId: { type: string, format: uuid }
+        locationId: { type: string, format: uuid }
         idempotencyKey: { type: string, format: uuid }
         createdAt: { type: string, format: date-time }
       additionalProperties: false
@@ -1545,7 +1794,7 @@ components:
         priceUsd: { type: number, description: Plan subscription price. }
         activeCards: { type: integer }
         includedCards: { type: integer }
-        estimatedMonthlyUsd: { type: number, description: Subscription + card overage (notifications 0 until they ship). }
+        estimatedMonthlyUsd: { type: number, description: Subscription + card overage + notification overage. }
         since: { type: string, format: date }
         nextChargeAt: { type: string, format: date }
         lastPaymentAt: { type: string, format: date }
@@ -1575,21 +1824,225 @@ components:
         overdueCount: { type: integer }
       additionalProperties: false
 
-    ReminderRequest:
+    LocationRef:
       type: object
-      required: [programId]
+      required: [id, name]
       properties:
-        programId: { type: string, format: uuid }
-        segment: { type: string, enum: [one_step_from_reward, inactive_30d, birthday], default: one_step_from_reward }
-        channel: { type: string, enum: [push, whatsapp], default: push }
+        id: { type: string, format: uuid }
+        name: { type: string }
       additionalProperties: false
 
-    ReminderResult:
+    Location:
       type: object
-      required: [queued]
+      required: [id, name, latitude, longitude, active, enrollmentQuery, createdAt]
       properties:
-        queued: { type: integer, description: Recipients queued. }
-        provider: { type: string, description: "For now: 'stub'." }
+        id: { type: string, format: uuid }
+        name: { type: string }
+        latitude: { type: number, minimum: -90, maximum: 90 }
+        longitude: { type: number, minimum: -180, maximum: 180 }
+        active: { type: boolean, description: Only active locales are scannable and sent to the wallet. }
+        enrollmentQuery:
+          type: string
+          description: Query string to append to any enrol link so sign-ups are attributed here (e.g. "local=<id>").
+        operationUserCount: { type: integer, description: Cashiers assigned to this locale. }
+        createdAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    LocationCreate:
+      type: object
+      required: [name, latitude, longitude]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        latitude: { type: number, minimum: -90, maximum: 90, description: "Decimal degrees, negative south (e.g. -0.18065)." }
+        longitude: { type: number, minimum: -180, maximum: 180, description: "Decimal degrees, negative west (e.g. -78.48443)." }
+        active: { type: boolean, description: Defaults to true. }
+      additionalProperties: false
+
+    LocationUpdate:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        latitude: { type: number, minimum: -90, maximum: 90 }
+        longitude: { type: number, minimum: -180, maximum: 180 }
+        active: { type: boolean }
+      additionalProperties: false
+
+    ToggleAutomation:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
+      additionalProperties: false
+
+    NearAutomation:
+      type: object
+      required: [enabled, stamps, points]
+      description: >-
+        «Meta próxima» — one general threshold for all stamps campaigns and one for all
+        points campaigns. Fires once when a visit brings the card within the threshold.
+      properties:
+        enabled: { type: boolean }
+        stamps: { type: integer, minimum: 1, maximum: 4, description: Notify when this many stamps or fewer are missing. }
+        points: { type: integer, minimum: 5, maximum: 50, multipleOf: 5, description: Notify when this many points or fewer are missing. }
+      additionalProperties: false
+
+    MilestoneAutomation:
+      type: object
+      required: [enabled, every]
+      properties:
+        enabled: { type: boolean }
+        every: { type: integer, minimum: 5, maximum: 50, multipleOf: 5, description: Every N visits (accruals) on a card. }
+      additionalProperties: false
+
+    ExpiryAutomation:
+      type: object
+      required: [enabled, warnDays]
+      description: Warns before balanceExpiryDays without a visit zeroes the balance. Inert while balanceExpiryDays is null.
+      properties:
+        enabled: { type: boolean }
+        warnDays: { type: integer, minimum: 1, maximum: 30, description: Days before expiry. }
+      additionalProperties: false
+
+    InactiveAutomation:
+      type: object
+      required: [enabled, days]
+      description: "\"Recordatorio de avance\" — Pro (automated_campaigns)."
+      properties:
+        enabled: { type: boolean }
+        days: { type: integer, minimum: 7, maximum: 90, multipleOf: 7, description: Days without a visit. }
+      additionalProperties: false
+
+    NotificationAutomations:
+      type: object
+      required: [balance, ready, near, milestone, expiry, inactive]
+      properties:
+        balance: { $ref: "#/components/schemas/ToggleAutomation" }
+        ready: { $ref: "#/components/schemas/ToggleAutomation" }
+        near: { $ref: "#/components/schemas/NearAutomation" }
+        milestone: { $ref: "#/components/schemas/MilestoneAutomation" }
+        expiry: { $ref: "#/components/schemas/ExpiryAutomation" }
+        inactive: { $ref: "#/components/schemas/InactiveAutomation" }
+      additionalProperties: false
+
+    CardLocationSettings:
+      type: object
+      required: [enrolled, topVisited]
+      description: Per-card (object) wallet locations, on top of the program's locales. At most 10 per card. Growth+ like all nearby points.
+      properties:
+        enrolled: { type: boolean, description: Add the locale where the customer signed up. }
+        topVisited: { type: boolean, description: Add the locales the customer visited most (cashier scans). }
+      additionalProperties: false
+
+    NotificationSettingsUpdate:
+      type: object
+      required: [automations, balanceExpiryDays, cardLocations]
+      properties:
+        automations: { $ref: "#/components/schemas/NotificationAutomations" }
+        balanceExpiryDays:
+          type: [integer, "null"]
+          minimum: 7
+          maximum: 365
+          description: >-
+            Merchant-wide (owner decision): stamps/points expire after this many days without
+            a visit — the balance goes to 0, earned rewards are kept. null = never expire.
+        cardLocations: { $ref: "#/components/schemas/CardLocationSettings" }
+      additionalProperties: false
+
+    NotificationSettings:
+      type: object
+      required: [automations, balanceExpiryDays, cardLocations, platformRules]
+      properties:
+        automations: { $ref: "#/components/schemas/NotificationAutomations" }
+        balanceExpiryDays: { type: [integer, "null"] }
+        cardLocations: { $ref: "#/components/schemas/CardLocationSettings" }
+        platformRules: { $ref: "#/components/schemas/PlatformNotificationRules" }
+      additionalProperties: false
+
+    PlatformNotificationRules:
+      type: object
+      required: [capPerDay, quietHoursEnabled, quietStart, quietEnd, timezone]
+      properties:
+        capPerDay: { type: integer, minimum: 1, maximum: 3, description: Max notifications per card per rolling 24 h. Google allows 3. }
+        quietHoursEnabled: { type: boolean, description: When on, nothing is pushed between quietStart and quietEnd; it goes out at quietEnd. }
+        quietStart: { type: string, description: "Fixed \"21:00\"." }
+        quietEnd: { type: string, description: "Fixed \"08:00\"." }
+        timezone: { type: string, description: "Fixed \"America/Guayaquil\"." }
+      additionalProperties: false
+
+    PlatformNotificationRulesUpdate:
+      type: object
+      properties:
+        capPerDay: { type: integer, minimum: 1, maximum: 3 }
+        quietHoursEnabled: { type: boolean }
+      additionalProperties: false
+
+    AudienceCount:
+      type: object
+      required: [count]
+      properties:
+        count: { type: integer }
+        levelMin: { type: integer, description: For level counts. }
+        locationId: { type: string, format: uuid, description: For locale counts. }
+        name: { type: string, description: Locale name, for locale counts. }
+      additionalProperties: false
+
+    NotificationAudiences:
+      type: object
+      required: [all, near, inactive, levels, locations]
+      properties:
+        all: { type: integer, description: Every notifiable card — also "Tarjetas que reciben". }
+        near: { type: integer, description: Within the merchant's near-goal thresholds. }
+        inactive: { type: integer, description: No visit in 30 days. }
+        levels:
+          type: array
+          items: { $ref: "#/components/schemas/AudienceCount" }
+          description: Cards at level >= levelMin, for levelMin 2..10.
+        locations:
+          type: array
+          items: { $ref: "#/components/schemas/AudienceCount" }
+          description: One entry per active locale — customers who signed up or scanned there.
+      additionalProperties: false
+
+    NotificationCreate:
+      type: object
+      required: [type, audience, body]
+      properties:
+        type: { type: string, enum: [general, event, flash], description: "general = Aviso general (every plan); event, flash = Growth+." }
+        audience: { type: string, enum: [all, near, inactive, level, location], description: Anything but all = Growth+. }
+        levelMin: { type: integer, minimum: 2, maximum: 50, description: Required when audience = level. }
+        locationId: { type: string, format: uuid, description: Required when audience = location. }
+        title: { type: string, maxLength: 60, description: Message header; defaults to the business name. }
+        body: { type: string, minLength: 1, maxLength: 150 }
+        url: { type: string, maxLength: 500, pattern: "^https://", description: Optional "more information" link (Growth+); must relate to the program. }
+        eventAt: { type: string, format: date-time, description: Required when type = event. The message hides from the pass 6 h after it. }
+        flashHours: { type: integer, minimum: 1, maximum: 72, description: Required when type = flash. The message hides from the pass when the offer closes. }
+        scheduledAt: { type: string, format: date-time, description: Omit to send now; otherwise a future instant (max 60 days ahead). }
+      additionalProperties: false
+
+    Notification:
+      type: object
+      required: [id, source, type, audience, body, status, recipients, delivered, visits48h, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        source: { type: string, enum: [manual, automation] }
+        type: { type: string, enum: [general, event, flash, balance, ready, near, milestone, expiry, inactive] }
+        audience: { type: string, enum: [all, near, inactive, level, location, automatic] }
+        levelMin: { type: integer }
+        locationId: { type: string, format: uuid }
+        locationName: { type: string }
+        title: { type: string }
+        body: { type: string, description: For automations, a sample of the day's message (texts are personalised per card). }
+        url: { type: string }
+        eventAt: { type: string, format: date-time }
+        flashHours: { type: integer }
+        status: { type: string, enum: [scheduled, queued, sent, cancelled] }
+        scheduledAt: { type: string, format: date-time }
+        sentAt: { type: string, format: date-time }
+        day: { type: string, format: date, description: Automations — the Ecuador day this batch covers. }
+        recipients: { type: integer, description: Cards targeted. }
+        delivered: { type: integer, description: Cards the wallet accepted the message for. }
+        visits48h: { type: integer, description: Recipients with a visit or redemption within 48 h of their delivery. }
+        createdAt: { type: string, format: date-time }
       additionalProperties: false
 
     DemoContext:

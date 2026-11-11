@@ -12,8 +12,9 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated
 
-from conpass_common import CurrentIdentity, create_app, lambda_handler
+from conpass_common import CurrentIdentity, create_app, lambda_handler, locations, wallet_sync
 from conpass_common.campaigns import SEASONAL, campaign_fields, inactivity_fields, require_active
+from conpass_common.db import service_client
 from conpass_common.errors import (
     Conflict,
     DiscountAlreadyUsed,
@@ -31,11 +32,11 @@ from conpass_common.models import (
     ScanResolveRequest,
     ValidateAccessRequest,
 )
-from conpass_common.providers import get_wallet_provider
-from conpass_common.providers.wallet import build_pass_content
+from conpass_common.notify.automations import AccrualEvent, after_accrual
 from fastapi import Header, Query
 
 from . import logic
+from .logic import CardState
 from .repository import CardRow, OperationsRepository, SupabaseRepository, TxnRow
 
 log = logging.getLogger(__name__)
@@ -83,7 +84,8 @@ def _operation_result(card: CardRow, txn: TxnRow) -> dict:
         "transaction": {
             "id": txn.id, "cardId": txn.card_id, "kind": txn.kind,
             "stampsDelta": txn.stamps_delta, "pointsDelta": txn.points_delta,
-            "operationUserId": txn.operation_user_id, "createdAt": txn.created_at.isoformat(),
+            "operationUserId": txn.operation_user_id, "locationId": txn.location_id,
+            "createdAt": txn.created_at.isoformat(),
         },
         "walletUpdateQueued": True,
     }).model_dump(by_alias=True, exclude_none=True)
@@ -144,19 +146,40 @@ def _card_model(c: dict, program: dict) -> dict:
 def _push_wallet_update(repo: OperationsRepository, card_id: str) -> None:
     """Reflect a just-committed balance change into the installed pass. Best-effort:
     a wallet failure must never fail the (backend-authoritative) in-store operation,
-    and this runs after commit so it can't extend the transaction."""
+    and this runs after commit so it can't extend the transaction. The pass is rebuilt
+    from the DB by wallet_sync (balances, level, messages, locations)."""
     try:
-        card = repo.get_card_row(card_id)
-        if card is None:
-            return
-        program = repo.get_program(card["program_id"])
-        if program is None:
-            return
-        merchant = repo.get_merchant(card["merchant_id"])
-        customer = repo.get_customer(card["customer_id"]) if card.get("customer_id") else None
-        get_wallet_provider().update(build_pass_content(card, program, merchant, customer))
+        wallet_sync.push_card(service_client(), card_id)
     except Exception:  # noqa: BLE001 - wallet reflection is non-critical
         log.warning("wallet update failed for card %s", card_id, exc_info=True)
+
+
+def _resolve_location(identity, merchant_id: str, location_id) -> str | None:
+    """The scan's locale: None when omitted (a merchant without locales); else checked
+    (active, the merchant's, assigned to a cashier) — 422 propagates."""
+    if location_id is None:
+        return None
+    return locations.resolve_scan_location(service_client(), identity, merchant_id,
+                                           str(location_id))
+
+
+def _enqueue_event_automation(card: CardRow, before: CardState, outcome,
+                              rules: logic.ProgramRules) -> None:
+    """After an accrual commits: queue at most one wallet notification (ready > milestone
+    > near > balance). Best-effort — a failure is logged and never reaches the cashier."""
+    try:
+        stamps = rules.mechanic == "stamps"
+        target = rules.stamps_for_reward if stamps else rules.points_for_reward
+        after_held = card.state.stamps if stamps else card.state.points
+        before_held = before.stamps if stamps else before.points
+        after_accrual(service_client(), AccrualEvent(
+            card_id=card.id, merchant_id=card.merchant_id,
+            mechanic="stamps" if stamps else "points",
+            before_held=before_held, after_held=after_held,
+            gained=outcome.stamps_delta if stamps else outcome.points_delta,
+            target=target, rewards_earned=outcome.rewards_earned, accrual_count=0))
+    except Exception:  # noqa: BLE001 - notifications never fail an accrual
+        log.warning("event automation failed for card %s", card.id, exc_info=True)
 
 
 @app.post("/operations/resolve")
@@ -194,17 +217,20 @@ def accrue(
         rules = repo.get_rules(card.program_id)
         if rules is None:
             raise NotFound("program not found")
+        location_id = _resolve_location(identity, card.merchant_id, body.locationId)
         if repo.recent_accrual_count(card.id, ACCRUAL_WINDOW_SECONDS) >= MAX_ACCRUALS_PER_WINDOW:
             raise RateLimited("too many accruals in the fraud window")
         try:
             outcome = logic.accrue(rules, card.state, stamps=body.stamps, amount=body.amount)
         except logic.RewardMechanicError as exc:
             raise ValidationFailed(str(exc)) from exc
+        before = card.state
         card.state = outcome.state
         txn = TxnRow(str(uuid.uuid4()), card.id, outcome.kind, outcome.stamps_delta,
-                     outcome.points_delta, str(body.operationUserId), _now())
+                     outcome.points_delta, str(body.operationUserId), _now(), location_id)
         repo.commit(card, txn)
         _push_wallet_update(repo, card.id)
+        _enqueue_event_automation(card, before, outcome, rules)
         return StoredResponse(200, _operation_result(card, txn))
 
     return run_idempotent(get_idempotency_store(), key=key, endpoint="accrue",
@@ -226,6 +252,7 @@ def redeem(
         if card is None:
             raise NotFound("card not found")
         identity.require_merchant(card.merchant_id)
+        location_id = _resolve_location(identity, card.merchant_id, body.locationId)
         if card.program_type == SEASONAL:
             # Applying a seasonal discount: only while the campaign is active, once.
             program = repo.get_program(card.program_id)
@@ -239,7 +266,7 @@ def redeem(
         except logic.RewardMechanicError as exc:
             raise Conflict(str(exc)) from exc
         txn = TxnRow(str(uuid.uuid4()), card.id, "redeem", 0, 0,
-                     str(body.operationUserId), _now())
+                     str(body.operationUserId), _now(), location_id)
         repo.commit(card, txn)
         _push_wallet_update(repo, card.id)
         return StoredResponse(200, _operation_result(card, txn))

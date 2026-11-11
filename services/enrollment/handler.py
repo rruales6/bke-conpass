@@ -11,14 +11,15 @@ from datetime import date, timedelta
 from enum import Enum
 from typing import Annotated
 
-from conpass_common import create_app, lambda_handler
+from conpass_common import create_app, lambda_handler, wallet_sync
 from conpass_common.campaigns import SEASONAL, STATUS_DISABLED, campaign_status, require_active
 from conpass_common.cards import new_opaque_token
+from conpass_common.db import service_client
 from conpass_common.errors import NotFound, ValidationFailed
 from conpass_common.idempotency import IdempotencyStore, StoredResponse, run_idempotent
+from conpass_common.locations import active_locations
 from conpass_common.models import EnrollmentRequest
 from conpass_common.providers import get_wallet_provider
-from conpass_common.providers.wallet import build_pass_content
 from fastapi import Header
 from fastapi.responses import JSONResponse
 
@@ -94,7 +95,9 @@ def _wallet_links(repo: EnrollmentRepository, card: dict, program: dict,
     """
     try:
         merchant = repo.get_merchant(card["merchant_id"])
-        content = build_pass_content(card, program, merchant, customer)
+        # Through wallet_sync: issue() re-PUTs the program class, so the content must
+        # carry the merchant's nearby locales or every enrolment would wipe them.
+        content = wallet_sync.content_for(None, card, program, merchant, customer)
         provider = get_wallet_provider()
         link = provider.issue(content).add_link if mutate else provider.add_link(content)
         return {"google": link}
@@ -102,6 +105,20 @@ def _wallet_links(repo: EnrollmentRepository, card: dict, program: dict,
         log.warning("wallet link generation failed for card %s", card.get("id"),
                     exc_info=True)
         return {}
+
+
+def _enrolled_location_id(merchant_id: str, location_id) -> str | None:
+    """The `?local=` attribution, kept only when it is an active locale of the program's
+    merchant. Silent otherwise: a stale or foreign link must never block a sign-up."""
+    if location_id is None:
+        return None
+    try:
+        wanted = str(location_id)
+        if any(r["id"] == wanted for r in active_locations(service_client(), merchant_id)):
+            return wanted
+    except Exception:  # noqa: BLE001 - attribution is optional
+        log.warning("enrolled location lookup failed", exc_info=True)
+    return None
 
 
 @app.post("/programs/{program_id}/enroll")
@@ -158,7 +175,7 @@ def enroll_customer(
             days = _VALIDITY_DAYS.get(program.get("membership_validity") or "")
             muntil = (date.today() + timedelta(days=days)).isoformat() if days else None
 
-        card = repo.create_card({
+        card_data = {
             "program_id": program_id,
             "merchant_id": merchant_id,
             "customer_id": customer["id"],
@@ -172,7 +189,11 @@ def enroll_customer(
             "language": _language(body.language),
             # A seasonal card is born with its single discount available.
             "rewards_available": 1 if program["type"] == SEASONAL else 0,
-        })
+        }
+        enrolled_at = _enrolled_location_id(merchant_id, body.locationId)
+        if enrolled_at:
+            card_data["enrolled_location_id"] = enrolled_at
+        card = repo.create_card(card_data)
         links = _wallet_links(repo, card, program, customer, mutate=True)
         return StoredResponse(201, _card_issued(card, program, links))
 

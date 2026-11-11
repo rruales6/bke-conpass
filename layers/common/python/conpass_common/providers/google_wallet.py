@@ -17,6 +17,7 @@ no Lambda pays for `google-auth`.
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
 import re
@@ -27,7 +28,16 @@ import jwt
 
 from ..config import settings
 from ..errors import NotConfigured
-from .wallet import IssuedPass, PassContent, WalletKind, WalletProvider, normalize_language
+from .wallet import (
+    IssuedPass,
+    PassContent,
+    PassMessage,
+    WalletKind,
+    WalletObjectMissing,
+    WalletProvider,
+    WalletQuotaExceeded,
+    normalize_language,
+)
 
 GOOGLE_WALLET_SCOPE = "https://www.googleapis.com/auth/wallet_object.issuer"
 SAVE_LINK_BASE = "https://pay.google.com/gp/v/save/"
@@ -76,6 +86,9 @@ _LABELS: dict[str, dict[str, str]] = {
         "email": "CORREO",
         "active": "Activa",
         "no_expiry": "Sin caducidad",
+        "level": "NIVEL",
+        "expires": "SALDO VENCE",
+        "more_info": "Más información",
     },
     "en": {
         "loyalty_stamps": "Stamp card",
@@ -100,6 +113,9 @@ _LABELS: dict[str, dict[str, str]] = {
         "email": "EMAIL",
         "active": "Active",
         "no_expiry": "No expiry",
+        "level": "LEVEL",
+        "expires": "BALANCE EXPIRES",
+        "more_info": "More information",
     },
 }
 
@@ -110,6 +126,10 @@ _MONTHS = {
 }
 # Ecuador has no DST, so a fixed offset is exact (and needs no tz database on Lambda).
 _EC_OFFSET = "-05:00"
+# Google caps both lists at 10 per object (and merchantLocations at 10 per class); more
+# are rejected, so trim here rather than fail a whole pass write.
+MAX_MESSAGES = 10
+MAX_LOCATIONS = 10
 
 
 def date_range(start: str | None, end: str | None, lang: str) -> str | None:
@@ -135,6 +155,44 @@ def _percent(value: int, lang: str) -> str:
 def _loc(value: str, lang: str) -> dict:
     """A Google `LocalizedString` in the card's own language."""
     return {"defaultValue": {"language": lang, "value": value}}
+
+
+def _day(iso: str, lang: str) -> str:
+    """`2026-12-04` → `4 dic 2026` / `4 Dec 2026` — the pass speaks the card's language."""
+    y, m, d = (int(x) for x in iso[:10].split("-"))
+    return f"{d} {_MONTHS[lang][m - 1]} {y}"
+
+
+def _locations(points) -> list[dict]:
+    return [{"latitude": float(lat), "longitude": float(lng)}
+            for lat, lng in list(points)[:MAX_LOCATIONS]]
+
+
+def _message_payload(message: PassMessage, lang: str, message_type: str) -> dict:
+    """Google Message. The body is rendered as (limited) HTML on the back of the pass, so
+    merchant-written text is escaped; the optional link becomes the one anchor."""
+    body = html.escape(message.body, quote=False)
+    if message.url:
+        body += (f' <a href="{html.escape(message.url, quote=True)}">'
+                 f"{_LABELS[lang]['more_info']}</a>")
+    payload: dict = {"id": message.id, "header": message.header, "body": body,
+                     "messageType": message_type}
+    if message.display_until is not None:
+        until = message.display_until
+        payload["displayInterval"] = {
+            "end": {"date": until.isoformat() if hasattr(until, "isoformat") else str(until)}}
+    return payload
+
+
+def _is_quota_error(resp: httpx.Response) -> bool:
+    """Google answers a 4th notifying message in 24 h with QuotaExceededException —
+    surfaced as HTTP 429, or a 4xx whose error text names the quota."""
+    if resp.status_code == 429:
+        return True
+    if resp.status_code < 400:
+        return False
+    text = resp.text.lower()
+    return "quotaexceeded" in text or "quota exceeded" in text
 
 
 def _cell(module_id: str) -> dict:
@@ -292,6 +350,9 @@ class GoogleWalletProvider(WalletProvider):
             "classTemplateInfo": {
                 "cardTemplateOverride": {"cardRowTemplateInfos": self._card_rows(content)}
             },
+            # Always sent (a PUT clears omitted fields): [] when the plan has no nearby
+            # notifications or the merchant has no active locale.
+            "merchantLocations": _locations(content.merchant_locations),
         }
 
     def _text_modules(self, content: PassContent) -> list[dict]:
@@ -340,6 +401,15 @@ class GoogleWalletProvider(WalletProvider):
             add("hdr1", "progress", f"{min(held, total)} / {total}" if total else str(held))
             add("hdr2", "to_redeem", str(content.rewards_available))
             add("hdr3", "redeemed", str(content.rewards_redeemed))
+            # Back of the pass only (no template cell points at these ids). The level is
+            # what segments are built on, so the holder can see theirs; the expiry date
+            # is what the expiry reminder refers to.
+            if content.level:
+                mods.append({"id": "lvl", "header": label["level"],
+                             "body": str(content.level)})
+            if content.balance_expires_on:
+                mods.append({"id": "exp", "header": label["expires"],
+                             "body": _day(content.balance_expires_on, lang)})
 
         if content.reward_text:
             add("sec0", "reward", content.reward_text)
@@ -361,6 +431,13 @@ class GoogleWalletProvider(WalletProvider):
             "header": _loc(content.program_name, lang),
             "barcode": {"type": "QR_CODE", "value": content.opaque_token},
             "textModulesData": self._text_modules(content),
+            # Both DB-derived and always present: the object is PUT whole, so leaving
+            # them out would wipe the back-of-pass messages and nearby points on every
+            # balance update. Re-sent messages keep their ids and type TEXT — only
+            # addMessage notifies, so a re-sent message never buzzes the phone again.
+            "messages": [_message_payload(m, lang, "TEXT")
+                         for m in content.messages[:MAX_MESSAGES]],
+            "merchantLocations": _locations(content.card_locations),
         }
         if (content.program_type == "seasonal_discount"
                 and content.valid_from and content.valid_until):
@@ -412,6 +489,22 @@ class GoogleWalletProvider(WalletProvider):
         obj = self._object_payload(content)
         with self._api() as api:
             api.put(f"/genericObject/{obj['id']}", json=obj).raise_for_status()
+
+    def send_message(self, content: PassContent, message: PassMessage, *,
+                     notify: bool = True) -> None:
+        """addMessage on the card's object. `notify` → TEXT_AND_NOTIFY (lock-screen push,
+        at most 3 per pass per 24 h); otherwise TEXT (back of the pass only)."""
+        lang = normalize_language(content.language)
+        payload = {"message": _message_payload(
+            message, lang, "TEXT_AND_NOTIFY" if notify else "TEXT")}
+        with self._api() as api:
+            resp = api.post(f"/genericObject/{self._object_id(content)}/addMessage",
+                            json=payload)
+        if _is_quota_error(resp):
+            raise WalletQuotaExceeded(resp.text[:300])
+        if resp.status_code == 404:
+            raise WalletObjectMissing(f"no Google object for card {content.card_id}")
+        resp.raise_for_status()
 
     def sync_program(self, content: PassContent) -> None:
         """Refresh the program's class — the card-front row template lives there."""
@@ -494,6 +587,10 @@ class GoogleWalletProvider(WalletProvider):
 
         # `origins` costs ~200 encoded characters and only matters to the JS button
         # API; the URL form does not need it, and the budget is better spent on content.
+        # A brand-new card has no messages yet; locations are re-applied by the first
+        # REST write. Neither belongs in a URL that is already near its length limit.
+        obj.pop("messages", None)
+        obj.pop("merchantLocations", None)
         link = self._encode_save_jwt(sa, {"genericObjects": [obj]}, origins=False)
         if len(link) > SAVE_LINK_MAX_URL:
             log.warning(

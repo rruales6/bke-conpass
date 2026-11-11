@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 
-from conpass_common import CurrentIdentity, create_app, lambda_handler
+from conpass_common import CurrentIdentity, create_app, lambda_handler, wallet_sync
 from conpass_common.assets import presign_upload, public_asset_url
 from conpass_common.campaigns import (
     ACCUMULATION_TYPES,
@@ -17,7 +17,6 @@ from conpass_common.db import service_client
 from conpass_common.errors import Forbidden, NotFound, ValidationFailed
 from conpass_common.models import AppearanceUploadRequest, ProgramCreate, ProgramUpdate
 from conpass_common.providers import get_wallet_provider
-from conpass_common.providers.wallet import build_pass_content
 
 from .repository import ProgramsRepository
 
@@ -244,12 +243,13 @@ def _push_appearance_to_passes(repo: ProgramsRepository, program: dict) -> None:
             return
         merchant = repo.get_merchant(str(program["merchant_id"]))
         provider = get_wallet_provider()
+        client = None   # wallet_sync resolves the service client lazily
+        # Locales, plan and messages: everything a full PUT must carry (wallet_sync).
+        ctx = wallet_sync.merchant_context(client, str(program["merchant_id"]))
         try:
             # Class-level template (card-front row layout) lives once per program, not
-            # once per card — refresh it before touching any individual pass. Any one
-            # of the batch's cards works: the fields sync_program reads are all
-            # program/merchant-level, not per-card.
-            provider.sync_program(build_pass_content(cards[0], program, merchant))
+            # once per card — refresh it before touching any individual pass.
+            provider.sync_program(wallet_sync.program_content(client, program, merchant, ctx))
         except Exception:  # noqa: BLE001 - wallet reflection is non-critical
             log.warning("wallet program sync failed for program %s",
                         program.get("id"), exc_info=True)
@@ -260,7 +260,8 @@ def _push_appearance_to_passes(repo: ProgramsRepository, program: dict) -> None:
         for card in cards:
             try:
                 customer = customers.get(card.get("customer_id"))
-                provider.update(build_pass_content(card, program, merchant, customer))
+                provider.update(wallet_sync.content_for(client, card, program, merchant,
+                                                        customer, ctx))
             except Exception:  # noqa: BLE001 - one bad pass must not stop the rest
                 log.warning("wallet appearance push failed for card %s",
                             card.get("id"), exc_info=True)

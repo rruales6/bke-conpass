@@ -173,6 +173,9 @@ class _FakeQuery:
     def eq(self, *_):
         return self
 
+    def limit(self, *_):
+        return self
+
     def execute(self):
         return type("R", (), {"data": self._rows})()
 
@@ -198,7 +201,7 @@ def test_cards_wallet_links_includes_customer_email(monkeypatch):
     }
     monkeypatch.setattr(h, "service_client", lambda: _FakeClient(tables))
     provider = _CapturingProvider()
-    monkeypatch.setattr(h, "get_wallet_provider", lambda: provider)
+    monkeypatch.setattr("conpass_common.wallet_sync.get_wallet_provider", lambda: provider)
     _identity(h.app, monkeypatch)
     r = TestClient(h.app).get(f"/cards/{CARD1}/wallet-links")
     assert r.status_code == 200
@@ -217,7 +220,7 @@ def test_cards_wallet_links_skips_customer_query_without_customer_id(monkeypatch
     }
     monkeypatch.setattr(h, "service_client", lambda: _FakeClient(tables))
     provider = _CapturingProvider()
-    monkeypatch.setattr(h, "get_wallet_provider", lambda: provider)
+    monkeypatch.setattr("conpass_common.wallet_sync.get_wallet_provider", lambda: provider)
     _identity(h.app, monkeypatch)
     r = TestClient(h.app).get(f"/cards/{CARD1}/wallet-links")
     assert r.status_code == 200
@@ -227,42 +230,30 @@ def test_cards_wallet_links_skips_customer_query_without_customer_id(monkeypatch
 # --------------------------------------------------------------------------- #
 # Operations service — the post-commit wallet push carries the customer's email
 # --------------------------------------------------------------------------- #
-def test_push_wallet_update_includes_customer_email(monkeypatch):
+def test_push_wallet_update_delegates_to_wallet_sync(monkeypatch):
+    """The pass is rebuilt from the DB by wallet_sync (customer email included there)."""
     from services.operations import handler as h
-    from services.operations.repository import InMemoryRepository
 
-    repo = InMemoryRepository()
-    repo.card_rows[CARD1] = {"id": CARD1, "program_id": P1, "merchant_id": M1,
-                             "customer_id": CUST1, "type": "loyalty_stamps",
-                             "opaque_token": "TOK", "stamps": 3, "holder_name": "Juan"}
-    repo.programs[P1] = {"id": P1, "merchant_id": M1, "type": "loyalty_stamps",
-                        "name": "Café", "stamps_for_reward": 8}
-    repo.merchants[M1] = {"id": M1, "business_name": "Conpass QA"}
-    repo.customers[CUST1] = {"id": CUST1, "email": "juan@example.com"}
-    provider = _CapturingProvider()
-    monkeypatch.setattr(h, "get_wallet_provider", lambda: provider)
+    calls = []
+    monkeypatch.setattr(h, "service_client", lambda: "client")
+    monkeypatch.setattr("conpass_common.wallet_sync.push_card",
+                        lambda client, card_id: calls.append((client, card_id)))
 
-    h._push_wallet_update(repo, CARD1)
+    h._push_wallet_update(None, CARD1)
 
-    assert provider.updated[-1].member_email == "juan@example.com"
+    assert calls == [("client", CARD1)]
 
 
-def test_push_wallet_update_without_customer_id_skips_the_read(monkeypatch):
+def test_push_wallet_update_swallows_wallet_errors(monkeypatch):
     from services.operations import handler as h
-    from services.operations.repository import InMemoryRepository
 
-    repo = InMemoryRepository()
-    repo.card_rows[CARD1] = {"id": CARD1, "program_id": P1, "merchant_id": M1,
-                             "type": "loyalty_stamps", "opaque_token": "TOK", "stamps": 3}
-    repo.programs[P1] = {"id": P1, "merchant_id": M1, "type": "loyalty_stamps",
-                        "name": "Café", "stamps_for_reward": 8}
-    repo.merchants[M1] = {"id": M1, "business_name": "Conpass QA"}
-    provider = _CapturingProvider()
-    monkeypatch.setattr(h, "get_wallet_provider", lambda: provider)
+    def boom(client, card_id):
+        raise RuntimeError("wallet down")
 
-    h._push_wallet_update(repo, CARD1)
+    monkeypatch.setattr(h, "service_client", lambda: "client")
+    monkeypatch.setattr("conpass_common.wallet_sync.push_card", boom)
 
-    assert provider.updated[-1].member_email is None
+    h._push_wallet_update(None, CARD1)     # must not raise
 
 
 # --------------------------------------------------------------------------- #

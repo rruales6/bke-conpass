@@ -30,6 +30,7 @@ class TxnRow:
     points_delta: int
     operation_user_id: str | None
     created_at: datetime
+    location_id: str | None = None   # locale of the scan (Phase 16)
 
 
 class OperationsRepository(Protocol):
@@ -181,6 +182,7 @@ class SupabaseRepository:
             "id": txn.id, "card_id": txn.card_id, "merchant_id": card.merchant_id,
             "kind": txn.kind, "stamps_delta": txn.stamps_delta,
             "points_delta": txn.points_delta, "operation_user_id": txn.operation_user_id,
+            "location_id": txn.location_id,
         }).execute()
 
     def list_redemptions(self, program_id: str, from_: str | None,

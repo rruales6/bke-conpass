@@ -26,7 +26,10 @@ def test_health():
 
 
 def test_me_returns_identity(monkeypatch):
+    import services.identity.handler as h
     from services.identity.handler import app
+    monkeypatch.setattr(h, "identity_locations", lambda *_a: [])
+    monkeypatch.setattr(h, "service_client", lambda: None)
     monkeypatch.setitem(app.dependency_overrides, require_identity, lambda: Identity(
         user_id=U1, email="a@b.co", roles=["merchant_owner"], merchant_id=M1))
     body = TestClient(app).get("/me").json()
