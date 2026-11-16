@@ -1,4 +1,4 @@
-"""Automation message texts (es/en), usted register — design: NOTIFICATIONS.md.
+"""Automation message texts (es/en), tú register, no exclamation marks — design: NOTIFICATIONS.md.
 
 Pure functions, no I/O. The header of every automation message is the business name; only
 the body is rendered here. Singular/plural is handled per unit ("1 sello" / "2 sellos") so
@@ -17,7 +17,7 @@ _UNITS = {
     "en": {STAMPS: ("stamp", "stamps"), POINTS: ("point", "points")},
 }
 _DAYS = {"es": ("día", "días"), "en": ("day", "days")}
-_DEFAULT_REWARD = {"es": "su recompensa", "en": "your reward"}
+_DEFAULT_REWARD = {"es": "tu recompensa", "en": "your reward"}
 
 
 @dataclass(frozen=True)
@@ -66,15 +66,15 @@ def render(kind: str, lang: str | None, facts: MessageFacts) -> str:
 
 
 def _missing_es(f: MessageFacts) -> str:
-    return "le falta" if f.missing == 1 else "le faltan"
+    return "te falta" if f.missing == 1 else "te faltan"
 
 
 def _balance(lang: str, f: MessageFacts) -> str:
     reward = reward_text(lang, f.reward)
     if lang == "es":
         gained = unit(lang, f.mechanic, f.n or 0)
-        return (f"Sumó {gained}. Lleva {f.held} / {f.target}: {_missing_es(f)} "
-                f"{f.missing} para su recompensa: {reward}.")
+        return (f"Sumaste {gained}. Llevas {f.held} / {f.target}: {_missing_es(f)} "
+                f"{f.missing} para tu recompensa: {reward}.")
     return (f"You earned {unit(lang, f.mechanic, f.n or 0)}. You have {f.held} / {f.target}: "
             f"{f.missing} to go for {reward}.")
 
@@ -82,9 +82,9 @@ def _balance(lang: str, f: MessageFacts) -> str:
 def _ready(lang: str, f: MessageFacts) -> str:
     reward = reward_text(lang, f.reward)
     if lang == "es":
-        return (f"¡Completó su tarjeta! Su recompensa le espera: {reward}. "
-                "Al canjearla, su tarjeta empieza de nuevo.")
-    return (f"Card complete! Your reward is waiting: {reward}. "
+        return (f"Completaste tu tarjeta. Tu recompensa te espera: {reward}. "
+                "Al canjearla, tu tarjeta empieza de nuevo.")
+    return (f"Card complete. Your reward is waiting: {reward}. "
             "Once redeemed, your card starts again.")
 
 
@@ -92,15 +92,15 @@ def _near(lang: str, f: MessageFacts) -> str:
     reward = reward_text(lang, f.reward)
     missing = unit(lang, f.mechanic, f.missing or 0)
     if lang == "es":
-        verb = "Le falta" if f.missing == 1 else "Le faltan"
-        return f"{verb} {missing} para su recompensa: {reward}. ¿Pasa hoy?"
+        verb = "Te falta" if f.missing == 1 else "Te faltan"
+        return f"{verb} {missing} para tu recompensa: {reward}. ¿Pasas hoy?"
     return f"Only {missing} to go for {reward}. Drop by today?"
 
 
 def _milestone(lang: str, f: MessageFacts) -> str:
     if lang == "es":
-        return f"¡Su visita n.º {f.n}! Gracias por volver a {f.merchant}."
-    return f"Visit number {f.n}! Thank you for coming back to {f.merchant}."
+        return f"Esta es tu visita n.º {f.n}. Gracias por volver a {f.merchant}."
+    return f"This is visit number {f.n}. Thank you for coming back to {f.merchant}."
 
 
 def _expiry(lang: str, f: MessageFacts) -> str:
@@ -108,8 +108,8 @@ def _expiry(lang: str, f: MessageFacts) -> str:
     days = days_text(lang, f.days or 0)
     one = f.held == 1
     if lang == "es":
-        verb, use = ("vence", "Úselo") if one else ("vencen", "Úselos")
-        possessive = "Su" if one else "Sus"
+        verb, use = ("vence", "Úsalo") if one else ("vencen", "Úsalos")
+        possessive = "Tu" if one else "Tus"
         return f"{possessive} {held} {verb} en {days}. {use} antes de perderlo{'' if one else 's'}."
     verb, pronoun = ("expires", "it") if one else ("expire", "them")
     return f"Your {held} {verb} in {days}. Use {pronoun} before you lose {pronoun}."
@@ -118,8 +118,8 @@ def _expiry(lang: str, f: MessageFacts) -> str:
 def _inactive(lang: str, f: MessageFacts) -> str:
     days = days_text(lang, f.days or 0)
     if lang == "es":
-        return (f"Hace {days} que no le vemos. Lleva {f.held} / {f.target}: "
-                "su recompensa está cerca.")
+        return (f"Hace {days} que no te vemos. Llevas {f.held} / {f.target}: "
+                "tu recompensa está cerca.")
     return f"It's been {days}. You have {f.held} / {f.target}: your reward is close."
 
 

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from conpass_common.db import service_client
-from conpass_common.demo import DEMO_CUSTOMER_EMAIL
+from conpass_common.demo import DEMO_CUSTOMER_EMAIL, pick_demo_program
 from conpass_common.usage import notifications_used
 
 
@@ -57,9 +57,8 @@ class MerchantsRepository:
         return rows[0] if rows else None
 
     def latest_program(self, merchant_id: str) -> dict | None:
-        rows = (self._c.table("programs").select("*").eq("merchant_id", merchant_id)
-                .eq("active", True).order("created_at", desc=True).limit(1).execute().data)
-        return rows[0] if rows else None
+        """The demo's showcase campaign: pinned stamps -> any pinned -> latest active."""
+        return pick_demo_program(self._c, merchant_id)
 
     def sample_card_code(self, merchant_id: str, program_id: str) -> str | None:
         """Opaque token of the seeded demo customer's active card: the one in

@@ -175,6 +175,12 @@ def test_appearance_upload_url_cross_tenant_forbidden(monkeypatch):
 class _FakeProgramsCrudRepo:
     """Supports create/get/update so POST and PATCH /programs can be exercised."""
 
+    def is_demo(self, merchant_id):
+        return False
+
+    def count_live_visitor_campaigns(self, merchant_id):
+        return 0
+
     def __init__(self, program=None):
         self._p = dict(program) if program else None
         self.created: dict | None = None

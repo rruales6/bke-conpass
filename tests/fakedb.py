@@ -7,6 +7,7 @@ handlers registered by name. Timestamps compare as ISO strings (all UTC in tests
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 _OPS = {"eq": lambda a, b: a == b, "in": lambda a, b: a in b, "gt": lambda a, b: a > b,
@@ -158,10 +159,12 @@ class FakeDB:
             row.setdefault("status", "pending")
             row.setdefault("attempts", 0)
             self._unique(name, row, "dedupe_key")
+        if name == "programs":
+            row.setdefault("created_at", datetime.now(UTC).isoformat())
         if name == "notifications":
             row.setdefault("status", "queued")
             row.setdefault("recipients", 0)
-            row.setdefault("created_at", "2026-11-11T12:00:00+00:00")
+            row.setdefault("created_at", datetime.now(UTC).isoformat())
             if row.get("source") == "automation":
                 clash = [r for r in self.rows(name) if r.get("source") == "automation"
                          and (r["merchant_id"], r["type"], r["day"])

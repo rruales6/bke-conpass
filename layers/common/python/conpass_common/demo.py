@@ -29,6 +29,11 @@ DEMO_CARD_DEDUPE_KEY = "demo-sample-card"   # makes the seeded card unique per p
 # Anti-spam rules for the public demo (anyone can use the shared credentials).
 DEMO_CARD_TTL_DAYS = 7              # demo cards are deactivated this long after enrolment
 DEMO_DAILY_MANUAL_SENDS = 3         # manual notifications per Ecuador day
+# Phase 17: campaigns a visitor creates live 30 minutes; the two pinned ones never expire.
+DEMO_CAMPAIGN_TTL_MINUTES = 30
+DEMO_MAX_VISITOR_CAMPAIGNS = 10     # live non-pinned campaigns per demo merchant
+DEMO_PINNED_STAMPS_NAME = "Tarjeta de acumulación de sellos"
+DEMO_PINNED_POINTS_NAME = "Tarjeta de acumulación por puntos"
 
 
 def is_demo_merchant(client, merchant_id: str) -> bool:
@@ -90,20 +95,91 @@ def expire_demo_cards(client, now: datetime | None = None, *, revoke=None) -> di
     return out
 
 
+def _parse_ts(value) -> datetime:
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
+def demo_expires_at(program_row: dict) -> datetime | None:
+    """When a visitor-created demo campaign is deleted; None for a pinned one."""
+    if program_row.get("demo_pinned") or not program_row.get("created_at"):
+        return None
+    return _parse_ts(program_row["created_at"]) + timedelta(minutes=DEMO_CAMPAIGN_TTL_MINUTES)
+
+
+def count_live_visitor_campaigns(client, merchant_id: str, now: datetime | None = None) -> int:
+    """Non-pinned campaigns of the merchant that the purge has not removed yet."""
+    now = now or datetime.now(UTC)
+    cutoff = (now - timedelta(minutes=DEMO_CAMPAIGN_TTL_MINUTES)).astimezone(UTC).isoformat()
+    res = (client.table("programs").select("id", count="exact")
+           .eq("merchant_id", str(merchant_id)).eq("demo_pinned", False)
+           .gte("created_at", cutoff).execute())
+    return res.count if res.count is not None else len(res.data or [])
+
+
+def purge_demo_campaigns(client, now: datetime | None = None, *, revoke=None) -> dict:
+    """Delete visitor-created demo campaigns older than DEMO_CAMPAIGN_TTL_MINUTES.
+
+    For each demo merchant: non-pinned programs past the TTL get their cards' Google
+    passes revoked best-effort (any error is logged and counted, never aborts), then the
+    program row is deleted; cards, transactions and birthday rows cascade via FKs. One
+    query per demo merchant when there is nothing to do."""
+    revoke = revoke or _revoke_pass
+    now = now or datetime.now(UTC)
+    cutoff = (now - timedelta(minutes=DEMO_CAMPAIGN_TTL_MINUTES)).astimezone(UTC).isoformat()
+    merchants = (client.table("merchants").select("id").eq("is_demo", True)
+                 .execute().data or [])
+    out = {"deleted": 0, "revoke_failed": 0}
+    for m in merchants:
+        old = (client.table("programs").select("id").eq("merchant_id", m["id"])
+               .eq("demo_pinned", False).lt("created_at", cutoff).execute().data or [])
+        for program in old:
+            cards = (client.table("cards").select("id").eq("program_id", program["id"])
+                     .execute().data or [])
+            for card in cards:
+                try:
+                    revoke(card["id"])
+                except Exception:  # noqa: BLE001 - best-effort: any wallet error is skipped
+                    out["revoke_failed"] += 1
+                    log.warning("could not revoke the pass of card %s", card["id"],
+                                exc_info=True)
+            client.table("programs").delete().eq("id", program["id"]).execute()
+            out["deleted"] += 1
+    return out
+
+
+def pick_demo_program(client, merchant_id: str) -> dict | None:
+    """The demo's showcase campaign: the pinned stamps one, else any pinned, else the
+    latest active (same order as GET /demo)."""
+    rows = (client.table("programs").select("*").eq("merchant_id", str(merchant_id))
+            .eq("active", True).order("created_at", desc=True).execute().data or [])
+    return choose_demo_program(rows)
+
+
+def choose_demo_program(rows: list[dict]) -> dict | None:
+    """`rows` newest first."""
+    pinned = [r for r in rows if r.get("demo_pinned")]
+    stamps = [r for r in pinned
+              if r.get("mechanic") == "stamps" or r.get("type") == "loyalty_stamps"]
+    return (stamps or pinned or rows or [None])[0]
+
+
 def ensure_sample_card(c, merchant_id: str) -> dict | None:
     """Idempotently make sure the demo merchant has its sample customer + an active card
-    in its latest active program; returns that card row (None if there is no program).
+    in its showcase program (pinned stamps campaign, else any pinned, else the latest
+    active); returns that card row (None if there is no program).
 
     Backs the public GET /demo `sampleCardCode` so the demo cashier can be pre-filled.
     No Google Wallet object is issued — the card exists only to be looked up by its
     opaque token. `c` is a Supabase Data API client. Re-running creates no duplicates:
     the customer is keyed on (merchant, email) and the card on (program, dedupe key).
     """
-    programs = (c.table("programs").select("*").eq("merchant_id", merchant_id)
-                .eq("active", True).order("created_at", desc=True).limit(1).execute().data)
-    if not programs:
+    program = pick_demo_program(c, merchant_id)
+    if program is None:
         return None
-    program = programs[0]
 
     customers = (c.table("customers").select("*").eq("merchant_id", merchant_id)
                  .eq("email", DEMO_CUSTOMER_EMAIL).limit(1).execute().data)

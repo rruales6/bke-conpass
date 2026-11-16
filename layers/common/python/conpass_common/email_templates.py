@@ -1,4 +1,4 @@
-"""Credential email bodies (ES "usted" register + EN). Pure functions, no I/O.
+"""Login-details email bodies (ES "tú" register + EN). Pure functions, no I/O.
 
 Every interpolated value goes through html.escape; styles are inline; kept short and
 plain (text + simple HTML) to stay out of spam folders. Never log what these return:
@@ -12,31 +12,31 @@ CONTACT = "info@conpass.cards"
 
 _COPY = {
     "es": {
-        "subject": "Su cuenta de conpass está lista",
-        "subject_resend": "Sus nuevas credenciales de conpass",
+        "subject": "Tu cuenta de conpass está lista",
+        "subject_resend": "Tus nuevos datos de acceso a conpass",
         "greeting": "Hola {owner},",
         "greeting_anon": "Hola,",
         "intro": "La cuenta de {business} en conpass está lista.",
-        "intro_resend": "Hemos generado nuevas credenciales de acceso para {business} en conpass.",
+        "intro_resend": "Generamos nuevos datos de acceso para {business} en conpass.",
         "email_label": "Correo de acceso",
         "password_label": "Contraseña temporal",
-        "login": "Ingrese aquí",
-        "change": "Deberá cambiarla al ingresar por primera vez.",
-        "ignore": "Si no solicitó esta cuenta, ignore este correo.",
-        "contact": f"¿Necesita ayuda? Escríbanos a {CONTACT}.",
+        "login": "Entra aquí",
+        "change": "Cámbiala la primera vez que entres.",
+        "ignore": "Si no pediste esta cuenta, ignora este correo.",
+        "contact": f"¿Necesitas ayuda? Escríbenos a {CONTACT}.",
     },
     "en": {
         "subject": "Your conpass account is ready",
-        "subject_resend": "Your new conpass credentials",
+        "subject_resend": "Your new conpass login details",
         "greeting": "Hello {owner},",
         "greeting_anon": "Hello,",
         "intro": "The conpass account for {business} is ready.",
-        "intro_resend": "We have generated new login credentials for {business} on conpass.",
+        "intro_resend": "We generated new login details for {business} on conpass.",
         "email_label": "Login email",
         "password_label": "Temporary password",
         "login": "Log in here",
-        "change": "You'll be asked to change it at first login.",
-        "ignore": "If you didn't request this account, please ignore this email.",
+        "change": "Change it the first time you log in.",
+        "ignore": "If you didn't request this account, ignore this email.",
         "contact": f"Need help? Write to us at {CONTACT}.",
     },
 }

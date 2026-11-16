@@ -93,6 +93,12 @@ def test_campaign_fields_seasonal_and_plain():
 # POST / PATCH /programs
 # --------------------------------------------------------------------------- #
 class _ProgRepo:
+    def is_demo(self, merchant_id):
+        return False
+
+    def count_live_visitor_campaigns(self, merchant_id):
+        return 0
+
     def __init__(self, existing=None):
         self.rows = {r["id"]: r for r in (existing or [])}
         self.created: list[dict] = []

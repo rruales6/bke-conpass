@@ -201,8 +201,8 @@ def _tpl(lang, **over):
     return credentials_email(lang, **kw)
 
 
-@pytest.mark.parametrize("lang,marker", [("es", "Deberá cambiarla"),
-                                         ("en", "asked to change it")])
+@pytest.mark.parametrize("lang,marker", [("es", "Cámbiala"),
+                                         ("en", "Change it the first time")])
 def test_template_content(lang, marker):
     subject, text, html = _tpl(lang)
     for body in (text, html):
@@ -217,7 +217,7 @@ def test_template_content(lang, marker):
 def test_template_resend_and_fallback_language():
     s_new, _, _ = _tpl("es")
     s_resend, _, _ = _tpl("es", resend=True)
-    assert s_new != s_resend and "nuevas" in s_resend
+    assert s_new != s_resend and "nuevos" in s_resend
     assert _tpl("fr")[0] == s_new                   # unknown -> Spanish
 
 
@@ -509,7 +509,7 @@ def test_onboard_defaults_to_spanish(monkeypatch):
     sender = _Sender()
     h, provisioned, body = _onboard_setup(monkeypatch, sender)
     assert TestClient(h.app).post("/merchants", json=body).status_code == 201
-    assert provisioned["language"] == "es" and "Deberá" in sender.sent[0][2]
+    assert provisioned["language"] == "es" and "Cámbiala" in sender.sent[0][2]
 
 
 def test_onboard_email_failure_still_201(monkeypatch, caplog):

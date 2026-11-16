@@ -98,9 +98,10 @@ paths:
       operationId: getDemoContext
       summary: Public self-serve demo tenant context + shared test credentials
       description: >
-        Returns the most-recently created demo merchant, its latest program, and the
-        shared demo login, so the unauthenticated /demo sandbox can silently sign in and
-        walk the full journey. Demo logins only ever see demo-flagged data (tenant RLS).
+        Returns the most-recently created demo merchant, its fixed (pinned) stamps
+        campaign, and the shared demo login, so the unauthenticated /demo sandbox can
+        silently sign in and walk the full journey. Demo logins only ever see
+        demo-flagged data (tenant RLS).
       security: []
       responses:
         "200":
@@ -335,6 +336,10 @@ paths:
       tags: [programs]
       operationId: createProgram
       summary: Create & publish a program (enforces tier program limit)
+      description: >
+        In the public demo, a visitor-created campaign lives 30 minutes (demoExpiresAt)
+        and at most 10 can be live at once: beyond that, 429 with details.reason
+        demo_campaign_limit.
       requestBody:
         required: true
         content:
@@ -348,6 +353,7 @@ paths:
               schema: { $ref: "#/components/schemas/Program" }
         "402": { $ref: "#/components/responses/TierLimit" }
         "422": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
 
   /programs/{programId}:
     parameters:
@@ -367,6 +373,9 @@ paths:
       tags: [programs]
       operationId: updateProgram
       summary: Update program parameters / appearance / active state
+      description: >
+        In the public demo, a pinned campaign (demoPinned) cannot be changed: 403 with
+        details.reason demo_pinned.
       requestBody:
         required: true
         content:
@@ -1540,6 +1549,20 @@ components:
             campaignStatus: { $ref: "#/components/schemas/CampaignStatus" }
             enrollmentUrl: { type: string, format: uri }
             createdAt: { type: string, format: date-time }
+            demoPinned:
+              type: boolean
+              description: >-
+                Public demo only: a fixed campaign that every visitor sees. It cannot be
+                edited or deactivated (PATCH and appearance upload answer 403 with
+                details.reason demo_pinned) and is never purged. False or omitted
+                outside the demo.
+            demoExpiresAt:
+              type: string
+              format: date-time
+              description: >-
+                Public demo only: when this visitor-created campaign is deleted (30
+                minutes after createdAt), together with its cards. Omitted for pinned
+                campaigns and outside the demo.
 
     EnrollmentRequest:
       description: Minimal PII by design; all personal fields optional.
@@ -2051,7 +2074,7 @@ components:
       properties:
         merchantId: { type: string, format: uuid }
         businessName: { type: string }
-        programId: { type: string, format: uuid, description: Latest program of the demo merchant — the public enroll journey targets it. }
+        programId: { type: string, format: uuid, description: "The demo's fixed (pinned) stamps campaign — the public enroll journey targets it. Falls back to any pinned campaign, then the latest active one." }
         ownerEmail: { type: string, format: email }
         ownerPassword: { type: string, description: "Shared demo password — intentionally public (sandbox account, demo-only data)." }
         sampleCardCode:

@@ -340,6 +340,9 @@ def test_program_create_has_no_limit(monkeypatch):
     import services.programs.handler as h
 
     class _Repo:
+        def is_demo(self, merchant_id):
+            return False
+
         def count_programs(self, merchant_id):
             return 50
 

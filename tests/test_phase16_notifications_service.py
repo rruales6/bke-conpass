@@ -236,8 +236,9 @@ def test_notifier_routes_jobs(monkeypatch):
     monkeypatch.setattr(n.dispatch, "run_dispatch", lambda c: calls.append("dispatch") or {})
     monkeypatch.setattr(n.automations, "run_daily", lambda c: calls.append("daily") or {})
     monkeypatch.setattr(n.demo, "expire_demo_cards", lambda c: calls.append("demo") or {})
+    monkeypatch.setattr(n.demo, "purge_demo_campaigns", lambda c: calls.append("purge") or {})
     n.handler({"job": "dispatch"}, None)
-    assert calls == ["dispatch"]
+    assert calls == ["purge", "dispatch"]
     calls.clear()
     n.handler({"job": "daily"}, None)
     assert calls == ["demo", "daily", "dispatch"]

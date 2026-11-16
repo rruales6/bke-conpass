@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from conpass_common.db import service_client
+from conpass_common.demo import count_live_visitor_campaigns, is_demo_merchant
 
 
 class ProgramsRepository:
@@ -12,6 +13,12 @@ class ProgramsRepository:
         res = self._c.table("programs").select("id", count="exact").eq(
             "merchant_id", merchant_id).execute()
         return res.count or 0
+
+    def is_demo(self, merchant_id: str) -> bool:
+        return is_demo_merchant(self._c, merchant_id)
+
+    def count_live_visitor_campaigns(self, merchant_id: str) -> int:
+        return count_live_visitor_campaigns(self._c, merchant_id)
 
     def create(self, data: dict) -> dict:
         return self._c.table("programs").insert(data).execute().data[0]

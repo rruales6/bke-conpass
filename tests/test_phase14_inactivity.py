@@ -99,6 +99,12 @@ def _create_body(**over):
 
 
 class _CreateRepo:
+    def is_demo(self, merchant_id):
+        return False
+
+    def count_live_visitor_campaigns(self, merchant_id):
+        return 0
+
     def __init__(self, existing=None):
         self.rows = {r["id"]: r for r in (existing or [])}
         self.created: list[dict] = []

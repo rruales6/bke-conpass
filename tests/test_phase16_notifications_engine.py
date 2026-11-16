@@ -35,47 +35,47 @@ def F(**kw):
 
 def test_balance_es_stamps_plural_and_singular():
     two = templates.render("balance", "es", F(n=2, held=3, target=8, missing=5))
-    assert two == "Sumó 2 sellos. Lleva 3 / 8: le faltan 5 para su recompensa: Un café gratis."
+    assert two == "Sumaste 2 sellos. Llevas 3 / 8: te faltan 5 para tu recompensa: Un café gratis."
     one = templates.render("balance", "es", F(n=1, held=7, target=8, missing=1))
-    assert one.startswith("Sumó 1 sello. Lleva 7 / 8: le falta 1 ")
+    assert one.startswith("Sumaste 1 sello. Llevas 7 / 8: te falta 1 ")
 
 
 def test_balance_points_and_english():
     pts = templates.render("balance", "es", F(mechanic="points", n=1, held=40, target=100,
                                               missing=60))
-    assert pts.startswith("Sumó 1 punto. ")
+    assert pts.startswith("Sumaste 1 punto. ")
     en = templates.render("balance", "en", F(n=1, held=3, target=8, missing=5))
     assert en == "You earned 1 stamp. You have 3 / 8: 5 to go for Un café gratis."
 
 
 def test_ready_near_milestone_expiry_inactive():
-    assert templates.render("ready", "es", F()).startswith("¡Completó su tarjeta!")
-    assert templates.render("ready", "en", F()).startswith("Card complete!")
+    assert templates.render("ready", "es", F()).startswith("Completaste tu tarjeta.")
+    assert templates.render("ready", "en", F()).startswith("Card complete.")
     assert templates.render("near", "es", F(missing=1)) == (
-        "Le falta 1 sello para su recompensa: Un café gratis. ¿Pasa hoy?")
-    assert templates.render("near", "es", F(missing=2)).startswith("Le faltan 2 sellos")
+        "Te falta 1 sello para tu recompensa: Un café gratis. ¿Pasas hoy?")
+    assert templates.render("near", "es", F(missing=2)).startswith("Te faltan 2 sellos")
     assert templates.render("near", "en", F(missing=1, mechanic="points")) == (
         "Only 1 point to go for Un café gratis. Drop by today?")
     assert templates.render("milestone", "es", F(n=10)) == (
-        "¡Su visita n.º 10! Gracias por volver a Café.")
-    assert templates.render("milestone", "en", F(n=10)).startswith("Visit number 10!")
+        "Esta es tu visita n.º 10. Gracias por volver a Café.")
+    assert templates.render("milestone", "en", F(n=10)).startswith("This is visit number 10.")
     assert templates.render("expiry", "es", F(held=5, days=7)) == (
-        "Sus 5 sellos vencen en 7 días. Úselos antes de perderlos.")
+        "Tus 5 sellos vencen en 7 días. Úsalos antes de perderlos.")
     assert templates.render("expiry", "es", F(held=1, days=1)) == (
-        "Su 1 sello vence en 1 día. Úselo antes de perderlo.")
+        "Tu 1 sello vence en 1 día. Úsalo antes de perderlo.")
     assert templates.render("expiry", "en", F(held=1, days=1)) == (
         "Your 1 stamp expires in 1 day. Use it before you lose it.")
     assert templates.render("inactive", "es", F(held=3, target=8, days=28)).startswith(
-        "Hace 28 días que no le vemos.")
+        "Hace 28 días que no te vemos.")
     assert templates.render("inactive", "en", F(held=3, target=8, days=1)).startswith(
         "It's been 1 day.")
 
 
 def test_reward_fallback_and_language_fallback():
-    assert "su recompensa: su recompensa." in templates.render(
+    assert "tu recompensa: tu recompensa." in templates.render(
         "balance", "es", F(reward="  ", n=1, held=1, target=8, missing=7))
     assert "your reward" in templates.render("ready", "en", F(reward=None))
-    assert templates.render("ready", "fr", F()).startswith("¡Completó")   # unknown -> es
+    assert templates.render("ready", "fr", F()).startswith("Completaste")   # unknown -> es
     with pytest.raises(ValueError):
         templates.render("nope", "es", F())
 
@@ -157,9 +157,9 @@ def test_enqueue_event_one_batch_per_type_and_day():
     db = FakeDB()
     for _ in range(2):
         outbox.enqueue_event(db, merchant_id=M1, card_id=C1, type_="ready", header="Café",
-                             body="¡Completó!", day=DAY)
+                             body="Completaste", day=DAY)
     outbox.enqueue_event(db, merchant_id=M1, card_id=C2, type_="ready", header="Café",
-                         body="¡Completó!", day=DAY)
+                         body="Completaste", day=DAY)
     assert len(db.rows("notifications")) == 1
     assert len(db.rows("notification_deliveries")) == 3
     outbox.enqueue_event(db, merchant_id=M1, card_id=C1, type_="ready", header="Café",
@@ -217,7 +217,7 @@ def test_after_accrual_enqueues_localized_message(monkeypatch):
     assert kind == "milestone"          # 10 accruals counted from the DB
     d = db.rows("notification_deliveries")[0]
     assert d["header"] == "Café Vecino"
-    assert d["body"] == "Visit number 10! Thank you for coming back to Café Vecino."
+    assert d["body"] == "This is visit number 10. Thank you for coming back to Café Vecino."
 
 
 def test_after_accrual_supersedes_stale_balance():

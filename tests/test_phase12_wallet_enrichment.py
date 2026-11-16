@@ -263,6 +263,12 @@ class _FakePushRepo:
     """Supports get/update (PATCH /programs) plus the wallet-push reads, with a batch
     get_customers_by_ids so tests can assert it is called once, not once per card."""
 
+    def is_demo(self, merchant_id):
+        return False
+
+    def count_live_visitor_campaigns(self, merchant_id):
+        return 0
+
     def __init__(self, program, cards, customers):
         self._p = program
         self._cards = cards

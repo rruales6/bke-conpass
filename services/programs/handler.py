@@ -14,7 +14,8 @@ from conpass_common.campaigns import (
     validate_seasonal,
 )
 from conpass_common.db import service_client
-from conpass_common.errors import Forbidden, NotFound, ValidationFailed
+from conpass_common.demo import DEMO_MAX_VISITOR_CAMPAIGNS, demo_expires_at
+from conpass_common.errors import Forbidden, NotFound, RateLimited, ValidationFailed
 from conpass_common.models import AppearanceUploadRequest, ProgramCreate, ProgramUpdate
 from conpass_common.providers import get_wallet_provider
 
@@ -67,8 +68,15 @@ def _appearance_patch(ap) -> dict:
     return patch
 
 
-def _program_model(p: dict) -> dict:
-    return {
+def _forbid_pinned(p: dict) -> None:
+    if p.get("demo_pinned"):
+        raise Forbidden("this campaign is fixed in the public demo and cannot be edited",
+                        details={"reason": "demo_pinned"})
+
+
+def _program_model(p: dict, is_demo: bool = False) -> dict:
+    """`is_demo` is looked up once per request by the caller, not per program."""
+    out = {
         "id": p["id"], "merchantId": p["merchant_id"], "type": p["type"],
         "name": p["name"], "mechanic": p.get("mechanic"),
         "stampsForReward": p.get("stamps_for_reward"),
@@ -94,6 +102,13 @@ def _program_model(p: dict) -> dict:
         "enrollmentUrl": f"{ENROLL_BASE}/{p['id']}",
         "createdAt": p["created_at"],
     }
+    if p.get("demo_pinned"):
+        out["demoPinned"] = True
+    elif is_demo:
+        expires = demo_expires_at(p)
+        if expires is not None:
+            out["demoExpiresAt"] = expires.isoformat()
+    return out
 
 
 @app.get("/programs")
@@ -102,7 +117,9 @@ def list_programs(identity: CurrentIdentity, merchantId: str | None = None):
     if merchant_id is None:
         raise NotFound("no merchant in scope")
     identity.require_merchant(merchant_id)
-    return [_program_model(p) for p in get_repo().list(merchant_id)]
+    repo = get_repo()
+    is_demo = repo.is_demo(merchant_id)
+    return [_program_model(p, is_demo) for p in repo.list(merchant_id)]
 
 
 @app.post("/programs", status_code=201)
@@ -112,6 +129,12 @@ def create_program(body: ProgramCreate, identity: CurrentIdentity):
     if merchant_id is None:
         raise Forbidden("no merchant in scope")
     repo = get_repo()
+    is_demo = repo.is_demo(merchant_id)
+    if is_demo and repo.count_live_visitor_campaigns(merchant_id) >= DEMO_MAX_VISITOR_CAMPAIGNS:
+        raise RateLimited("the public demo allows at most "
+                          f"{DEMO_MAX_VISITOR_CAMPAIGNS} visitor campaigns at a time",
+                          details={"reason": "demo_campaign_limit",
+                                   "limit": DEMO_MAX_VISITOR_CAMPAIGNS})
     # No program limit on any plan (Phase 13) — only active cards are metered.
     appearance = _appearance_patch(body.appearance)
     seasonal = body.type.value == SEASONAL
@@ -148,16 +171,17 @@ def create_program(body: ProgramCreate, identity: CurrentIdentity):
         "wallets": [w.value for w in body.wallets],
         **seasonal_cols,
     })
-    return _program_model(program)
+    return _program_model(program, is_demo)
 
 
 @app.get("/programs/{program_id}")
 def get_program(program_id: str, identity: CurrentIdentity):
-    p = get_repo().get(program_id)
+    repo = get_repo()
+    p = repo.get(program_id)
     if p is None:
         raise NotFound("program not found")
     identity.require_merchant(p["merchant_id"])
-    return _program_model(p)
+    return _program_model(p, repo.is_demo(p["merchant_id"]))
 
 
 @app.patch("/programs/{program_id}")
@@ -168,6 +192,7 @@ def update_program(program_id: str, body: ProgramUpdate, identity: CurrentIdenti
     if p is None:
         raise NotFound("program not found")
     identity.require_merchant(p["merchant_id"])
+    _forbid_pinned(p)
 
     patch: dict = {}
     if body.name is not None:
@@ -200,14 +225,15 @@ def update_program(program_id: str, body: ProgramUpdate, identity: CurrentIdenti
         patch["active"] = body.active
     if body.appearance is not None:
         patch.update(_appearance_patch(body.appearance))
+    is_demo = repo.is_demo(p["merchant_id"])
     if not patch:
-        return _program_model(p)
+        return _program_model(p, is_demo)
     # Snapshot before the write: `updated` may be the same row object we were handed.
     before = {col: p.get(col) for col in _WALLET_VISIBLE}
     updated = repo.update(program_id, patch)
     if any(patch[col] != before[col] for col in _WALLET_VISIBLE if col in patch):
         _push_appearance_to_passes(repo, updated)
-    return _program_model(updated)
+    return _program_model(updated, is_demo)
 
 
 @app.post("/programs/{program_id}/appearance-upload-url")
@@ -219,6 +245,7 @@ def create_appearance_upload_url(
     if p is None:
         raise NotFound("program not found")
     identity.require_merchant(p["merchant_id"])
+    _forbid_pinned(p)
     try:
         return presign_upload(
             program_id=program_id,
