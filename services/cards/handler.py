@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from conpass_common import CurrentIdentity, create_app, lambda_handler, wallet_sync
+from conpass_common.cards import card_flags
 from conpass_common.db import service_client
 from conpass_common.errors import NotFound
 
@@ -28,6 +29,7 @@ def _card_model(c: dict) -> dict:
         "language": c.get("language", "es"),
         "active": c.get("active", True),
         "walletInstalled": c.get("wallet_installed", False),
+        **card_flags(c),
         "createdAt": c["created_at"],
     }
 

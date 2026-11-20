@@ -184,7 +184,10 @@ def deliver(client, d: dict, *, send, now_fn: Callable[[], datetime]) -> str:
             fields["not_before"] = _iso(not_before)
         _update(client, d["id"], **fields)
         return status
-    _update(client, d["id"], status=status, sent_at=_iso(now_fn()), error=None)
+    fields = {"status": status, "sent_at": _iso(now_fn()), "error": None}
+    if d.get("_automation"):
+        fields["display_until"] = d["display_until"]
+    _update(client, d["id"], **fields)
     return status
 
 
@@ -208,6 +211,12 @@ def _process_card(client, deliveries: list[dict], ctx: dict) -> dict:
                     attempts=max(0, d.get("attempts", 1) - 1))   # a deferral is not a failure
             stats["deferred"] += 1
         else:
+            if ctx["sources"].get(d["notification_id"], MANUAL) == AUTOMATION:
+                # Automatic notices leave the pass 48 h after they go out (not after they
+                # were queued, which quiet hours may have delayed). Manual flash/event keep
+                # their own display_until.
+                d = {**d, "_automation": True,
+                     "display_until": _iso(now + outbox.AUTOMATION_DISPLAY)}
             status = deliver(client, d, send=ctx["send"], now_fn=ctx["now_fn"])
             stats[status] += 1
             if status == "sent":

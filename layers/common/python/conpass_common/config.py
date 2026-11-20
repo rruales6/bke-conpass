@@ -193,6 +193,11 @@ class Settings:
         return "info@conpass.cards"
 
     @property
+    def public_app_url(self) -> str:
+        """Base URL of the PWA for links printed on passes and e-mails (no trailing slash)."""
+        return (os.environ.get("CONPASS_PUBLIC_APP_URL") or "https://console.conpass.cards").rstrip("/")
+
+    @property
     def console_login_url(self) -> str:
         return os.environ.get("CONPASS_CONSOLE_LOGIN_URL") or "https://console.conpass.cards/login"
 

@@ -130,6 +130,13 @@ functions:
       - httpApi:
           method: POST
           path: /me/password
+      # Phase 18 — password recovery by e-mailed code (public)
+      - httpApi:
+          method: POST
+          path: /auth/forgot-password
+      - httpApi:
+          method: POST
+          path: /auth/reset-password
 
   merchants:
     <<: *fnDefaults
@@ -184,6 +191,25 @@ functions:
       - httpApi:
           method: DELETE
           path: /merchants/{merchantId}/locations/{locationId}
+      # Phase 18 — billing
+      - httpApi:
+          method: GET
+          path: /merchants/{merchantId}/payments
+      - httpApi:
+          method: GET
+          path: /merchants/{merchantId}/payments/{paymentId}/receipt
+      - httpApi:
+          method: GET
+          path: /merchants/{merchantId}/plan-change
+      - httpApi:
+          method: POST
+          path: /merchants/{merchantId}/plan-change
+      - httpApi:
+          method: DELETE
+          path: /merchants/{merchantId}/plan-change/{requestId}
+      - httpApi:
+          method: POST
+          path: /merchants/{merchantId}/plan-change/{requestId}/proof
 
   programs:
     <<: *fnDefaults
@@ -214,9 +240,16 @@ functions:
     handler: services/enrollment/handler.handler
     package: { patterns: ["!**", "services/enrollment/**"] }
     events:
+      - httpApi:              # public B2C card preview (Phase 18)
+          method: GET
+          path: /programs/{programId}/enroll
       - httpApi:              # public B2C path
           method: POST
           path: /programs/{programId}/enroll
+      # Phase 18 — optional birthday after saving the card (public, token-authorised)
+      - httpApi:
+          method: PUT
+          path: /programs/{programId}/enroll/birthday
 
   cards:
     <<: *fnDefaults
@@ -239,6 +272,11 @@ functions:
       - httpApi: { method: POST, path: /operations/accrue }
       - httpApi: { method: POST, path: /operations/redeem }
       - httpApi: { method: POST, path: /operations/validate-access }
+      # Phase 18 — recent operations + undo (O3)
+      - httpApi: { method: GET, path: /operations/recent }
+      - httpApi:
+          method: POST
+          path: /operations/{transactionId}/undo
       - httpApi:
           method: GET
           path: /programs/{programId}/redemptions
@@ -287,6 +325,37 @@ functions:
       - httpApi:
           method: PATCH
           path: /admin/notification-rules
+      # Phase 18 — merchant file, activation, payments, plan changes, platform settings
+      - httpApi:
+          method: GET
+          path: /admin/clients/{merchantId}
+      - httpApi:
+          method: POST
+          path: /admin/clients/{merchantId}/activate
+      - httpApi:
+          method: POST
+          path: /admin/clients/{merchantId}/reject
+      - httpApi:
+          method: POST
+          path: /admin/clients/{merchantId}/payments
+      - httpApi:
+          method: GET
+          path: /admin/clients/{merchantId}/payments/{paymentId}/receipt
+      - httpApi:
+          method: POST
+          path: /admin/clients/{merchantId}/payment-reminder
+      - httpApi:
+          method: POST
+          path: /admin/plan-changes/{requestId}/approve
+      - httpApi:
+          method: POST
+          path: /admin/plan-changes/{requestId}/reject
+      - httpApi:
+          method: GET
+          path: /admin/platform-settings
+      - httpApi:
+          method: PATCH
+          path: /admin/platform-settings
 
   notifications:
     <<: *fnDefaults
@@ -301,6 +370,19 @@ functions:
       - httpApi:
           method: DELETE
           path: /notifications/{notificationId}
+      - httpApi:
+          method: PATCH
+          path: /notifications/{notificationId}
+
+  # Phase 18 — read-only merchant reports (second visit, cohorts, campaigns, levels, branches, CSV)
+  reports:
+    <<: *fnDefaults
+    handler: services/reports/handler.handler
+    package: { patterns: ["!**", "services/reports/**"] }
+    events:
+      - httpApi: { method: GET, path: /reports/summary }
+      - httpApi: { method: GET, path: /reports/overview }
+      - httpApi: { method: GET, path: /reports/export }
 
   # Phase 16 — outbox dispatcher + daily automations. No HTTP: EventBridge only.
   notifier:
@@ -317,6 +399,9 @@ functions:
       - schedule:
           rate: cron(0 13 * * ? *)   # 08:00 Ecuador (UTC-5, no DST)
           input: { job: daily }
+      - schedule:
+          rate: cron(0 14 * * ? *)   # 09:00 Ecuador — birthday rewards (Phase 18)
+          input: { job: birthday }
 
 resources:
   Resources:

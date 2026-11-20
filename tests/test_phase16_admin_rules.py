@@ -74,10 +74,13 @@ def test_clients_estimate_includes_notification_overage(admin, monkeypatch):
         {"id": str(i), "merchant_id": M1, "status": "sent",
          "sent_at": "2026-11-03T10:00:00+00:00"} for i in range(600)]   # 100 over 500
     body = TestClient(admin.app).get("/admin/clients").json()
-    assert body[0]["estimatedMonthlyUsd"] == pytest.approx(4.99 + 100 * 0.015)
+    # v3.0: $5.99 (IVA incl.) + 100 extra notifications at $0.015, charged + 15 % IVA
+    expected = 5.99 + 100 * 0.015 * 1.15
+    assert body[0]["notificationsUsed"] == 600
+    assert body[0]["estimatedMonthlyUsd"] == pytest.approx(expected, abs=0.01)
     stats = TestClient(admin.app).get("/admin/stats").json()
-    assert stats["mrrUsd"] == pytest.approx(4.99 + 100 * 0.015)
-    assert stats["subscriptionMrrUsd"] == pytest.approx(4.99)
+    assert stats["mrrUsd"] == pytest.approx(expected, abs=0.01)
+    assert stats["subscriptionMrrUsd"] == pytest.approx(5.99)
 
 
 def test_tier_change_syncs_classes(admin, monkeypatch):

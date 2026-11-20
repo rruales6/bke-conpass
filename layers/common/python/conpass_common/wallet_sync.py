@@ -26,14 +26,14 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from .campaigns import ECUADOR_TZ
+from .card_links import birthday_link_url
 from .db import service_client
 from .notify.settings import (
     MAX_ACTIVE_LOCATIONS,
     MerchantNotificationSettings,
     load_merchant_settings,
 )
-from .plans import NEARBY_NOTIFICATIONS, get_plan, tier_for_merchant
+from .plans import AUTOMATED_CAMPAIGNS, NEARBY_NOTIFICATIONS, get_plan, tier_for_merchant
 from .providers import get_wallet_provider
 from .providers.wallet import IssuedPass, PassContent, PassMessage, build_pass_content
 
@@ -52,6 +52,7 @@ class MerchantContext:
     nearby: bool                                   # plan includes nearby notifications
     class_locations: tuple[tuple[float, float], ...]
     locations_by_id: dict                          # active locales, id -> (lat, lng)
+    birthdays: bool = False                        # Pro + birthday automation on → pass link
 
 
 def _db(client):
@@ -64,26 +65,44 @@ def merchant_context(client, merchant_id: str) -> MerchantContext:
     client = _db(client)
     settings = load_merchant_settings(client, merchant_id)
     try:
-        nearby = get_plan(tier_for_merchant(client, merchant_id)).has(NEARBY_NOTIFICATIONS)
-    except Exception:  # noqa: BLE001 - no subscription row → treat as no nearby
-        nearby = False
+        plan = get_plan(tier_for_merchant(client, merchant_id))
+    except Exception:  # noqa: BLE001 - no subscription row → no plan features
+        plan = None
+    nearby = bool(plan and plan.has(NEARBY_NOTIFICATIONS))
+    birthdays = bool(plan and plan.has(AUTOMATED_CAMPAIGNS)
+                     and getattr(settings, "birthday_on", False))
     rows = (client.table("merchant_locations").select("id,latitude,longitude")
             .eq("merchant_id", merchant_id).eq("active", True)
             .order("created_at").execute().data or [])
     by_id = {r["id"]: (float(r["latitude"]), float(r["longitude"])) for r in rows}
     class_points = tuple(list(by_id.values())[:MAX_ACTIVE_LOCATIONS]) if nearby else ()
-    return MerchantContext(settings, nearby, class_points, by_id)
+    return MerchantContext(settings, nearby, class_points, by_id, birthdays)
+
+
+AUTOMATION_MESSAGE_HOURS = 48   # D21: automatic notices leave the pass after 48 h
 
 
 def _card_messages(client, card_id: str, now: datetime) -> tuple[PassMessage, ...]:
+    """The last sent messages, newest first, minus the ones past their display window.
+
+    Automatic notices carry display_until = sent + 48 h (written by the outbox). Rows sent
+    before Phase 18 have none, so for an automation row without display_until the 48 h are
+    derived here from sent_at.
+    """
     client = _db(client)
     rows = (client.table("notification_deliveries")
-            .select("id,header,body,url,display_until,sent_at")
+            .select("id,header,body,url,display_until,sent_at,notifications(source)")
             .eq("card_id", card_id).in_("status", list(SENT_STATUSES))
             .order("sent_at", desc=True).limit(MAX_PASS_MESSAGES * 2).execute().data or [])
     out: list[PassMessage] = []
     for r in rows:
         until = _parse_ts(r.get("display_until"))
+        source = (r.get("notifications") or {}).get("source") if isinstance(
+            r.get("notifications"), dict) else None
+        if until is None and source == "automation":
+            sent = _parse_ts(r.get("sent_at"))
+            if sent is not None:
+                until = sent + timedelta(hours=AUTOMATION_MESSAGE_HOURS)
         if until is not None and until <= now:
             continue   # Google would hide it anyway; don't spend one of the 10 slots
         out.append(PassMessage(id=str(r["id"]), header=r["header"], body=r["body"],
@@ -114,16 +133,9 @@ def _card_locations(client, card: dict, ctx: MerchantContext) -> tuple:
 
 def _balance_expires_on(client, card: dict, program: dict,
                         ctx: MerchantContext) -> str | None:
-    days = ctx.settings.balance_expiry_days
-    if (not days or program.get("type") not in LOYALTY_TYPES
-            or not ((card.get("stamps") or 0) > 0 or (card.get("points") or 0) > 0)):
-        return None
-    rows = (_db(client).table("card_last_activity").select("last_at")
-            .eq("card_id", card["id"]).limit(1).execute().data or [])
-    last = _parse_ts(rows[0]["last_at"]) if rows else None
-    if last is None:
-        return None
-    return (last + timedelta(days=days)).astimezone(ECUADOR_TZ).date().isoformat()
+    """Balances no longer expire (Phase 18, O2): a card unused for 90 days pauses and keeps its
+    balance, so the pass never shows an expiry date. Kept as a seam in case that changes."""
+    return None
 
 
 def content_for(client, card: dict, program: dict, merchant: dict | None,
@@ -138,6 +150,8 @@ def content_for(client, card: dict, program: dict, merchant: dict | None,
         merchant_locations=ctx.class_locations,
         card_locations=_card_locations(client, card, ctx),
         balance_expires_on=_balance_expires_on(client, card, program, ctx),
+        birthday_url=(birthday_link_url(str(card["id"]), str(card["program_id"]))
+                      if ctx.birthdays and program.get("type") in LOYALTY_TYPES else None),
     )
 
 

@@ -172,23 +172,24 @@ def _db(**over):
 
 
 CARD = {"id": CARD1, "merchant_id": M1, "program_id": P1, "opaque_token": "TOK",
-        "stamps": 6, "points": 0, "rewards_available": 1, "rewards_redeemed": 1,
-        "enrolled_location_id": L2, "language": "es"}
+        "stamps": 6, "points": 0, "rewards_available": 1, "rewards_redeemed": 2,
+        "level": 3, "enrolled_location_id": L2, "language": "es"}
 PROGRAM = {"id": P1, "merchant_id": M1, "type": "loyalty_stamps", "name": "Café",
            "stamps_for_reward": 8}
 
 
 @pytest.mark.real_wallet_sync
-def test_context_sends_active_locales_only_on_nearby_plans():
+def test_context_sends_active_locales_on_every_plan():
     ctx = wallet_sync.merchant_context(_db(), M1)
     assert ctx.nearby and ctx.class_locations == ((-0.18065, -78.48443), (-0.20102, -78.43085))
+    # Phase 18 (v3.0 decision 8): "Estás cerca" is on every plan, Starter included.
     starter = wallet_sync.merchant_context(
         _db(subscriptions=[{"merchant_id": M1, "tier": "starter"}]), M1)
-    assert not starter.nearby and starter.class_locations == ()
+    assert starter.nearby and starter.class_locations == ctx.class_locations
 
 
 @pytest.mark.real_wallet_sync
-def test_content_derives_level_messages_locations_and_expiry():
+def test_content_derives_level_messages_and_locations():
     client = _db(
         merchant_notification_settings=[{"merchant_id": M1, "card_locations_enrolled": True,
                                          "card_locations_top": True,
@@ -209,12 +210,12 @@ def test_content_derives_level_messages_locations_and_expiry():
     )
     c = wallet_sync.content_for(client, CARD, PROGRAM, {"business_name": "Café Vecino"},
                                 None, now=NOW)
-    assert c.level == 3                                   # 1 + 1 available + 1 redeemed
+    assert c.level == 3                                   # cards.level (Phase 18), not derived
     assert [m.id for m in c.messages] == ["new"]          # expired + unsent dropped
     # enrolment locale first, then most-scanned active one; paused L3 never sent
     assert c.card_locations == ((-0.20102, -78.43085), (-0.18065, -78.48443))
     assert c.merchant_locations == ((-0.18065, -78.48443), (-0.20102, -78.43085))
-    assert c.balance_expires_on == "2026-12-01"           # last visit + 30 d, Ecuador date
+    assert c.balance_expires_on is None                   # O2: balances never expire
 
 
 @pytest.mark.real_wallet_sync
@@ -304,3 +305,33 @@ def test_dispatch_skips_cards_without_a_wallet_object():
                                      "attempts": 1}, send=send, now_fn=lambda: NOW)
     assert status == "skipped" and updates[-1]["status"] == "skipped"
     assert updates[-1]["error"].startswith("no_wallet_object")
+
+
+@pytest.mark.real_wallet_sync
+def test_automation_messages_leave_the_pass_after_48_hours():
+    """Phase 18 (D21): a pre-Phase-18 automation row has no display_until — derive sent + 48 h."""
+    sent_old = (NOW - timedelta(hours=49)).isoformat()
+    sent_new = (NOW - timedelta(hours=2)).isoformat()
+    client = _db(notification_deliveries=[
+        {"id": "auto-old", "card_id": CARD1, "status": "sent", "header": "h", "body": "a",
+         "url": None, "display_until": None, "sent_at": sent_old,
+         "notifications": {"source": "automation"}},
+        {"id": "manual-old", "card_id": CARD1, "status": "sent", "header": "h", "body": "m",
+         "url": None, "display_until": None, "sent_at": sent_old,
+         "notifications": {"source": "manual"}},
+        {"id": "auto-new", "card_id": CARD1, "status": "sent", "header": "h", "body": "b",
+         "url": None, "display_until": None, "sent_at": sent_new,
+         "notifications": {"source": "automation"}},
+    ])
+    c = wallet_sync.content_for(client, CARD, PROGRAM, None, None, now=NOW)
+    assert sorted(m.id for m in c.messages) == ["auto-new", "manual-old"]
+    kept = next(m for m in c.messages if m.id == "auto-new")
+    assert kept.display_until == NOW - timedelta(hours=2) + timedelta(hours=48)
+
+
+def test_level_comes_from_the_card_row():
+    from conpass_common.providers.wallet import build_pass_content
+    content = build_pass_content(dict(CARD, level=5), PROGRAM, None, None)
+    assert content.level == 5
+    seasonal = dict(PROGRAM, type="seasonal_discount")
+    assert build_pass_content(dict(CARD, level=5), seasonal, None, None).level is None

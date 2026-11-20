@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from conpass_common.db import service_client
 from conpass_common.demo import DEMO_CUSTOMER_EMAIL, pick_demo_program
-from conpass_common.usage import notifications_used
 
 
 class MerchantsRepository:
@@ -21,10 +20,11 @@ class MerchantsRepository:
 
     def create_subscription(
         self, merchant_id: str, tier: str, *,
+        billing_period: str = "monthly",
         payment_proof_key: str | None = None,
         payment_proof_uploaded_at: str | None = None,
     ) -> dict:
-        data = {"merchant_id": merchant_id, "tier": tier}
+        data = {"merchant_id": merchant_id, "tier": tier, "billing_period": billing_period}
         if payment_proof_key is not None:
             data["payment_proof_key"] = payment_proof_key
             data["payment_proof_uploaded_at"] = payment_proof_uploaded_at
@@ -98,24 +98,11 @@ class MerchantsRepository:
         (self._c.table("profiles").delete().eq("user_id", user_id)
          .eq("merchant_id", merchant_id).eq("role", "operation_user").execute())
 
-    def count_operation_users(self, merchant_id: str) -> int:
-        res = self._c.table("profiles").select("user_id", count="exact").eq(
-            "merchant_id", merchant_id).eq("role", "operation_user").execute()
-        return res.count or 0
-
-    # --- plan usage (GET /merchants/{id}/usage) ---
+    # --- plan usage (GET /merchants/{id}/usage lives in conpass_common.billing.usage_for) ---
     def active_card_count(self, merchant_id: str) -> int:
         rows = self._c.table("merchant_active_passes").select("*").eq(
             "merchant_id", merchant_id).execute().data
         return rows[0]["active_pass_count"] if rows else 0
-
-    def count_programs(self, merchant_id: str) -> int:
-        res = self._c.table("programs").select("id", count="exact").eq(
-            "merchant_id", merchant_id).execute()
-        return res.count or 0
-
-    def notifications_used(self, merchant_id: str, since) -> int:
-        return notifications_used(self._c, merchant_id, since)
 
     # --- locales (Phase 16) ---
     def list_locations(self, merchant_id: str) -> list[dict]:
@@ -142,6 +129,13 @@ class MerchantsRepository:
         res = (self._c.table("merchant_locations").select("id", count="exact")
                .eq("merchant_id", merchant_id).eq("active", True).execute())
         return res.count or 0
+
+    def location_stats(self, merchant_id: str) -> dict[str, dict]:
+        """location_id -> {enrolled_clients, visits_30d} for every branch, in one query
+        (the `location_stats` view, migration 0020)."""
+        rows = (self._c.table("location_stats").select("*")
+                .eq("merchant_id", merchant_id).execute().data or [])
+        return {r["location_id"]: r for r in rows}
 
     def location_assignments(self, merchant_id: str) -> list[dict]:
         """operation_user_locations rows ({user_id, location_id}) for the merchant's locales."""

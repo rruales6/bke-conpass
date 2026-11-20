@@ -139,20 +139,37 @@ def _fill_to_ten(merchants):
             "name": f"S{i}", "latitude": 0, "longitude": 0}).status_code == 201
 
 
-def test_active_limit_on_create_and_activate(merchants):
+def test_branch_limit_comes_from_the_plan_on_create_and_activate(merchants):
+    """v3.0 replaced the hard cap of 10 (409 active_location_limit) with the plan's branch
+    limit: 402 tier_limit with details.reason = location_limit. Pro allows 10."""
+    merchants.client.tables["subscriptions"] = [
+        {"merchant_id": M1, "tier": "pro", "payment_status": "paid"}]
     _fill_to_ten(merchants)
     c = TestClient(merchants.app)
     r = c.post(f"/merchants/{M1}/locations", json={"name": "11", "latitude": 0, "longitude": 0})
-    assert r.status_code == 409 and r.json()["details"]["reason"] == "active_location_limit"
+    assert r.status_code == 402 and r.json()["code"] == "tier_limit"
+    assert r.json()["details"] == {"reason": "location_limit", "limit": 10}
     # inactive creation is always fine; activating it is not
     r = c.post(f"/merchants/{M1}/locations", json={
         "name": "paused", "latitude": 0, "longitude": 0, "active": False})
     assert r.status_code == 201
     r = c.patch(f"/merchants/{M1}/locations/{L3}", json={"active": True})
-    assert r.status_code == 409 and r.json()["details"]["reason"] == "active_location_limit"
+    assert r.status_code == 402 and r.json()["details"]["reason"] == "location_limit"
     # pausing one frees a slot
     assert c.patch(f"/merchants/{M1}/locations/{L1}", json={"active": False}).status_code == 200
     assert c.patch(f"/merchants/{M1}/locations/{L3}", json={"active": True}).status_code == 200
+
+
+def test_a_smaller_plan_limits_sooner_and_names_the_upgrade(merchants):
+    merchants.client.tables["subscriptions"] = [
+        {"merchant_id": M1, "tier": "growth", "payment_status": "paid"}]      # L1 + L2 active
+    c = TestClient(merchants.app)
+    assert c.post(f"/merchants/{M1}/locations", json={
+        "name": "3rd", "latitude": 0, "longitude": 0}).status_code == 201
+    r = c.post(f"/merchants/{M1}/locations", json={"name": "4th", "latitude": 0, "longitude": 0})
+    assert r.status_code == 402
+    assert r.json()["details"] == {"reason": "location_limit", "limit": 3,
+                                   "requiredTier": "pro"}
 
 
 def test_update_and_delete_location(merchants):
@@ -356,7 +373,9 @@ def test_usage_endpoint_reports_notification_overage(monkeypatch):
     rows = [{"id": str(i), "merchant_id": M1, "status": "sent",
              "sent_at": "2026-11-02T10:00:00+00:00"} for i in range(501)]
     # period_start is "today's month": pin it so the fixture stays in-period.
-    monkeypatch.setattr(h, "period_start", lambda today: __import__("datetime").date(2026, 11, 1))
+    from conpass_common import billing
+    monkeypatch.setattr(billing, "period_start",
+                        lambda today: __import__("datetime").date(2026, 11, 1))
     client = FakeClient({
         "notification_deliveries": rows,
         "subscriptions": [{"merchant_id": M1, "tier": "starter", "payment_status": "paid"}]})

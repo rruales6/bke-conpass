@@ -39,6 +39,8 @@ tags:
     description: >-
       Wallet notifications — automations, manual sends, audiences, history (Phase 16).
       Service:notifications (HTTP) + notifier (scheduled dispatcher, no HTTP).
+  - name: reports
+    description: Read-only merchant reports — second visit, cohorts, campaigns, levels, branches, export (Phase 18). Service:reports
 
 security:
   - supabaseJwt: []
@@ -420,6 +422,23 @@ paths:
   /programs/{programId}/enroll:
     parameters:
       - $ref: "#/components/parameters/ProgramId"
+    get:
+      tags: [enrollment]
+      operationId: getEnrollPreview
+      summary: Public — what the customer is about to save (card preview on the 1-tap page)
+      description: >
+        Public facts of one campaign for the enrolment page (board 09): business, campaign,
+        goal, reward, look, status and whether the merchant offers a birthday gift (Pro with
+        birthdays on — drives the optional step after saving, board 20). No personal data.
+        404 for an unknown program.
+      security: []
+      responses:
+        "200":
+          description: Preview
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnrollPreview" }
+        "404": { $ref: "#/components/responses/NotFound" }
     post:
       tags: [enrollment]
       operationId: enrollCustomer
@@ -965,6 +984,29 @@ paths:
         "204": { description: Cancelled }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+    patch:
+      tags: [notifications]
+      operationId: updateNotification
+      summary: Edit a scheduled notification before it starts sending (Programados · Editar)
+      description: >
+        Only while status = scheduled (else 409). Partial update with the same rules and plan
+        gates as createNotification, validated on the merged result; scheduledAt must stay in
+        the future (max 60 days ahead).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NotificationUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Notification" }
+        "402": { $ref: "#/components/responses/TierLimit" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
 
   /admin/notification-rules:
     get:
@@ -993,6 +1035,522 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PlatformNotificationRules" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  # ------------------------------------------------------------------------------------
+  # Phase 18 — console redesign + business model v3.0 (D21, docs/design/PHASE-18-CONSOLE.md)
+  # ------------------------------------------------------------------------------------
+
+  /auth/forgot-password:
+    post:
+      tags: [me]
+      operationId: requestPasswordResetCode
+      summary: Public — e-mail a 6-digit code to reset the password
+      description: >
+        Always 202, whether or not the address has an account (no user enumeration). When it
+        does, a 6-digit code valid 15 minutes is e-mailed (D18 SMTP) and any earlier unused
+        code for that address stops working. At most 3 requests per address per 15 minutes →
+        429 rate_limited (details.reason too_many_requests). The demo owner never gets a code.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ForgotPasswordRequest" }
+      responses:
+        "202": { description: Accepted }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/reset-password:
+    post:
+      tags: [me]
+      operationId: resetPasswordWithCode
+      summary: Public — set a new password with the e-mailed code
+      description: >
+        422 details.reason: invalid_code (wrong code; counts an attempt), expired_code
+        (older than 15 minutes, already used, or superseded), too_many_attempts (5 wrong
+        tries burn the code), weak_password, same_password. On success the code is used,
+        any temporary-password flag is cleared and the user can sign in at once.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PasswordResetWithCode" }
+      responses:
+        "204": { description: Password changed }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /reports/summary:
+    get:
+      tags: [reports]
+      operationId: getReportSummary
+      summary: Home + campaign-list figures — second visit (30 days, with counts and the previous window), redemptions this month, per-campaign cards and redemptions
+      description: >
+        The merchant comes from the caller (owner or manager); platform_admin passes
+        merchantId. A manager's figures are limited to their branches.
+      parameters:
+        - $ref: "#/components/parameters/MerchantIdQuery"
+      responses:
+        "200":
+          description: Summary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReportSummary" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /reports/overview:
+    get:
+      tags: [reports]
+      operationId: getReportOverview
+      summary: Reports page — KPIs, weekly second-visit cohorts, per campaign, per level, per branch
+      description: >
+        Every number on the page moves together with the filters. `locationId` and the
+        `branches` block need `branch_reports` (Pro) → 402 when filtered by branch without
+        it; without it `branches` is simply omitted. A manager is always limited to their
+        branches (and may filter among them).
+      parameters:
+        - $ref: "#/components/parameters/MerchantIdQuery"
+        - name: weeks
+          in: query
+          required: false
+          schema: { type: integer, enum: [4, 8, 12], default: 8 }
+        - name: programId
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: locationId
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Overview
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReportOverview" }
+        "402": { $ref: "#/components/responses/TierLimit" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /reports/export:
+    get:
+      tags: [reports]
+      operationId: exportReport
+      summary: Pro — download a report section as CSV (UTF-8 with BOM, opens in Excel)
+      description: Needs `data_export` (Pro) → 402. Same filters as /reports/overview.
+      parameters:
+        - $ref: "#/components/parameters/MerchantIdQuery"
+        - name: section
+          in: query
+          required: true
+          schema: { type: string, enum: [cohorts, campaigns, levels, branches, redemptions] }
+        - name: weeks
+          in: query
+          required: false
+          schema: { type: integer, enum: [4, 8, 12], default: 8 }
+        - name: programId
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: locationId
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: CSV file (Content-Disposition attachment)
+          content:
+            text/csv:
+              schema: { type: string }
+        "402": { $ref: "#/components/responses/TierLimit" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /operations/recent:
+    get:
+      tags: [operations]
+      operationId: listRecentOperations
+      summary: The cashier's latest operations (scan screen) — newest first
+      description: >
+        An operation user sees their own operations; the owner sees the merchant's. Narrowed
+        to one locale with locationId. Customer names are shortened (first name + initial).
+      parameters:
+        - name: locationId
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 20, default: 5 }
+      responses:
+        "200":
+          description: Operations
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/RecentOperation" }
+
+  /operations/{transactionId}/undo:
+    parameters:
+      - $ref: "#/components/parameters/TransactionId"
+    post:
+      tags: [operations]
+      operationId: undoOperation
+      summary: Undo an accrual or redemption while the "Listo" screen still shows (O3)
+      description: >
+        Allowed only for the user who made the operation, within 30 seconds of it, when it
+        is still the card's latest operation and was not undone already. Writes a `reversal`
+        transaction, stamps the original `reversedAt`, restores the balance (and the level a
+        redemption raised) and re-syncs the wallet pass. Replays with the same
+        Idempotency-Key return the same result. 409 details.reason: undo_window_closed,
+        not_latest, already_reversed, not_undoable (kind cannot be undone).
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Reversed — the card after the undo, and the reversal transaction
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperationResult" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /programs/{programId}/enroll/birthday:
+    parameters:
+      - $ref: "#/components/parameters/ProgramId"
+    put:
+      tags: [enrollment]
+      operationId: setCardBirthday
+      summary: Public — the customer leaves (or clears) their birthday, day and month only
+      description: >
+        Optional, asked after the card is saved. Authorised by the card's opaque token
+        (the secret already in the customer's QR) or by the signed token of the pass-back
+        birthday link (conpass_common.card_links), never by login. The year is never asked
+        nor stored (D15). Sending day and month null clears it.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CardBirthdayUpdate" }
+      responses:
+        "204": { description: Saved }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /merchants/{merchantId}/payments:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+    get:
+      tags: [merchants]
+      operationId: listMerchantPayments
+      summary: The merchant's payments, newest first (Ajustes · Plan y facturación)
+      responses:
+        "200":
+          description: Payments
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Payment" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /merchants/{merchantId}/payments/{paymentId}/receipt:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+      - $ref: "#/components/parameters/PaymentId"
+    get:
+      tags: [merchants]
+      operationId: getMerchantPaymentReceipt
+      summary: Short-lived link to the receipt the merchant uploaded for a payment
+      responses:
+        "200":
+          description: Presigned download target
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentProofLink" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /merchants/{merchantId}/plan-change:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+    get:
+      tags: [merchants]
+      operationId: listPlanChanges
+      summary: The merchant's plan-change requests, newest first (at most 10)
+      responses:
+        "200":
+          description: Requests
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PlanChangeRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [merchants]
+      operationId: requestPlanChange
+      summary: Ask to change plan or billing period (O4)
+      description: >
+        Upgrade (a higher tier, or monthly → annual): status awaiting_payment, amountUsd is
+        the new period's price (IVA incl.), and the payment details are e-mailed. The
+        merchant then uploads a receipt (…/proof); platform-admin confirms and the new plan
+        starts. Downgrade (a lower tier, or annual → monthly): status scheduled for the next
+        charge date; the notifier applies it that day. Owner only. 409 conflict when a
+        request is already open (details.reason plan_change_open), or when the target equals
+        the current plan. Not available to the demo merchant (403).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlanChangeCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlanChangeRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /merchants/{merchantId}/plan-change/{requestId}:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+      - $ref: "#/components/parameters/RequestId"
+    delete:
+      tags: [merchants]
+      operationId: cancelPlanChange
+      summary: Cancel an open request (awaiting_payment, pending_review or scheduled)
+      responses:
+        "204": { description: Cancelled }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /merchants/{merchantId}/plan-change/{requestId}/proof:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+      - $ref: "#/components/parameters/RequestId"
+    post:
+      tags: [merchants]
+      operationId: submitPlanChangeProof
+      summary: Attach the transfer/DEUNA receipt to an upgrade request → pending_review
+      description: The receipt is uploaded first via POST /payment-proofs/upload-url.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentSubmission" }
+      responses:
+        "200":
+          description: Submitted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlanChangeRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/clients/{merchantId}:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+    get:
+      tags: [admin]
+      operationId: getClientDetail
+      summary: Platform-admin — the merchant file (verification, subscription, usage, payments, activity)
+      responses:
+        "200":
+          description: Merchant file
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminClientDetail" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /admin/clients/{merchantId}/activate:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+    post:
+      tags: [admin]
+      operationId: activateClient
+      summary: Platform-admin — activate after checking RUC and receipt; e-mails the access details
+      description: >
+        Both checks must be confirmed (rucVerified and proofVerified true, else 422). Marks
+        the signup payment confirmed, sets paymentStatus paid, next charge one period
+        ahead, the annual price lock when annual, and e-mails the owner a temporary password
+        (D18, same mechanics as resend-credentials). Logged in the activity log. 409 when
+        already active. 502 when activation succeeded but the e-mail failed (resend later).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClientActivation" }
+      responses:
+        "200":
+          description: Activated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminClientDetail" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "502": { $ref: "#/components/responses/EmailDeliveryFailed" }
+
+  /admin/clients/{merchantId}/reject:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+    post:
+      tags: [admin]
+      operationId: rejectClient
+      summary: Platform-admin — reject a signup (or its receipt) with a reason that is e-mailed to the merchant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClientRejection" }
+      responses:
+        "200":
+          description: Rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminClientDetail" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/EmailDeliveryFailed" }
+
+  /admin/clients/{merchantId}/payments:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+    post:
+      tags: [admin]
+      operationId: recordClientPayment
+      summary: Platform-admin — register a payment received (renewal, overage, other)
+      description: >
+        Creates a confirmed payment, sets lastPaymentAt, moves nextChargeAt one period ahead
+        for renewals (and refreshes the annual price lock), and sets paymentStatus paid.
+        Logged in the activity log.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentRecord" }
+      responses:
+        "201":
+          description: Recorded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Payment" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/clients/{merchantId}/payments/{paymentId}/receipt:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+      - $ref: "#/components/parameters/PaymentId"
+    get:
+      tags: [admin]
+      operationId: getClientPaymentReceipt
+      summary: Platform-admin — short-lived link to a payment's receipt
+      responses:
+        "200":
+          description: Presigned download target
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentProofLink" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /admin/clients/{merchantId}/payment-reminder:
+    parameters:
+      - $ref: "#/components/parameters/MerchantId"
+    post:
+      tags: [admin]
+      operationId: sendPaymentReminder
+      summary: Platform-admin — e-mail the owner a payment reminder with the amount due and the payment details
+      responses:
+        "200":
+          description: Sent
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CredentialsResent" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/EmailDeliveryFailed" }
+        "503": { $ref: "#/components/responses/NotConfigured" }
+
+  /admin/plan-changes/{requestId}/approve:
+    parameters:
+      - $ref: "#/components/parameters/RequestId"
+    post:
+      tags: [admin]
+      operationId: approvePlanChange
+      summary: Platform-admin — confirm an upgrade's payment and switch the plan now
+      description: >
+        Only for status pending_review (or awaiting_payment when paid by other means).
+        Confirms the linked payment, applies tier + billing period, and for annual sets the
+        price lock and the next charge one year ahead. Logged; the merchant is e-mailed.
+      responses:
+        "200":
+          description: Applied
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlanChangeRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /admin/plan-changes/{requestId}/reject:
+    parameters:
+      - $ref: "#/components/parameters/RequestId"
+    post:
+      tags: [admin]
+      operationId: rejectPlanChange
+      summary: Platform-admin — reject an upgrade request with a reason (e-mailed)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClientRejection" }
+      responses:
+        "200":
+          description: Rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlanChangeRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /admin/platform-settings:
+    get:
+      tags: [admin]
+      operationId: getPlatformSettings
+      summary: Platform-admin — pricing phase and the full payment details (admin form)
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformSettings" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    patch:
+      tags: [admin]
+      operationId: updatePlatformSettings
+      summary: Platform-admin — switch the pricing phase (launch → list when Apple Wallet ships)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlatformSettingsUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformSettings" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
@@ -1037,6 +1595,21 @@ components:
       schema: { type: string, format: uuid }
     CardId:
       name: cardId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    TransactionId:
+      name: transactionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    RequestId:
+      name: requestId
       in: path
       required: true
       schema: { type: string, format: uuid }
@@ -1127,22 +1700,44 @@ components:
         campaigns = seasonal + accumulation campaigns (every plan); basic_notifications =
         basic notifications (every plan, within the plan's notification allowance);
         reports = reports + campaign dashboard; user_management = operation users;
-        nearby_notifications = "Estás cerca"; manual_campaigns = personalised notifications
-        + manual notification campaigns; automated_campaigns = seasonal campaigns and
-        birthdays that launch themselves.
-      enum: [campaigns, basic_notifications, reports, user_management, nearby_notifications, manual_campaigns, automated_campaigns]
+        nearby_notifications = "Estás cerca" (every plan since v3.0); manual_campaigns =
+        group messages, events, flash offers, links, 48 h result (Growth+);
+        automated_campaigns = custom-text reminders and sequences, birthdays, level-up
+        notice, yearly repeating campaigns (Pro); branch_reports = reports by branch (Pro);
+        staff_roles = the manager role (Pro); data_export = CSV export (Pro).
+      enum: [campaigns, basic_notifications, reports, user_management, nearby_notifications, manual_campaigns, automated_campaigns, branch_reports, staff_roles, data_export]
+
+    PricingPhase:
+      type: string
+      description: >
+        launch = launch price charged, list price shown struck through (until Apple Wallet
+        ships); list = list price charged. Annual terms keep their locked price until renewal.
+      enum: [launch, list]
+
+    BillingPeriod:
+      type: string
+      description: annual = 20 % less per month, paid up front, price locked until renewal.
+      enum: [monthly, annual]
 
     Plan:
       type: object
-      required: [tier, priceUsd, includedCards, extraCardUsd, includedNotifications, features]
+      description: Catalog entry (business model v3.0). Plan prices include IVA; per-unit extras are + IVA.
+      required: [tier, priceUsd, listPriceUsd, annualPriceUsd, annualListPriceUsd, pricingPhase,
+                 includedCards, extraCardUsd, includedNotifications, extraNotificationUsd,
+                 locationLimit, features]
       properties:
         tier: { $ref: "#/components/schemas/Tier" }
-        priceUsd: { type: number, description: Monthly subscription, USD. }
-        includedCards: { type: integer, description: Active cards included per month. }
-        extraCardUsd: { type: number, description: USD per active card above the inclusion. }
-        includedNotifications: { type: integer, description: "Notifications included per month (every plan has some since business model v2.0: 500 / 1 000 / 10 000)." }
-        extraNotificationUsd: { type: number, description: "USD per notification above the inclusion (0.015 / 0.010 / 0.005). Absent only if a plan ever ships without notifications." }
-        operationUserLimit: { type: integer, description: Absent = unlimited. }
+        priceUsd: { type: number, description: "Monthly price charged today, IVA included (launch: 5.99 / 17.99 / 57.99)." }
+        listPriceUsd: { type: number, description: "Monthly list price, IVA included (7.99 / 22.99 / 74.99). Shown struck through while pricingPhase = launch." }
+        annualPriceUsd: { type: number, description: "Annual price charged today, IVA included (launch: 56.99 / 171.99 / 555.99)." }
+        annualListPriceUsd: { type: number, description: "Annual list price, IVA included (75.99 / 219.99 / 718.99)." }
+        pricingPhase: { $ref: "#/components/schemas/PricingPhase" }
+        includedCards: { type: integer, description: Active cards included per month (200 / 1,000 / 5,000). }
+        extraCardUsd: { type: number, description: "USD per active card above the inclusion, + IVA." }
+        includedNotifications: { type: integer, description: "Notifications included per month (500 / 3,000 / 10,000)." }
+        extraNotificationUsd: { type: number, description: "USD per notification above the inclusion, + IVA (0.015 / 0.010 / 0.005)." }
+        locationLimit: { type: integer, description: Branches allowed (1 / 3 / 10). }
+        operationUserLimit: { type: integer, description: "Absent = unlimited (every plan since v3.0)." }
         features:
           type: array
           items: { $ref: "#/components/schemas/PlanFeature" }
@@ -1160,7 +1755,11 @@ components:
         notificationsUsed: { type: integer, description: "Wallet notifications delivered with a push this calendar month (UTC) — the billed figure." }
         extraNotifications: { type: integer }
         extraNotificationsUsd: { type: number }
-        estimatedTotalUsd: { type: number, description: plan.priceUsd + both overages, rounded to cents. }
+        estimatedTotalUsd: { type: number, description: "subscriptionUsd + both overages + IVA on the overages, rounded to cents." }
+        subscriptionUsd: { type: number, description: "Subscription part of this month's charge, IVA included (the locked/annual price in a renewal month, 0 in an annual term's other months)." }
+        ivaUsd: { type: number, description: IVA contained in estimatedTotalUsd (subscription + overage). }
+        billingPeriod: { $ref: "#/components/schemas/BillingPeriod" }
+        locationCount: { type: integer, description: Active branches (against plan.locationLimit). }
         programCount: { type: integer }
         operationUserCount: { type: integer }
         periodStart: { type: string, format: date, description: First day of the current billing month (UTC). }
@@ -1194,7 +1793,18 @@ components:
 
     PaymentStatus:
       type: string
-      enum: [pending, paid, overdue, suspended]
+      description: >
+        pending = signed up, awaiting verification ("Por verificar" when a receipt exists);
+        paid = active and up to date; overdue = payment late; suspended = switched off by
+        platform-admin; rejected = signup rejected (reason e-mailed, Subscription.rejectionReason).
+      enum: [pending, paid, overdue, suspended, rejected]
+
+    StaffRole:
+      type: string
+      description: >
+        Operation-user role. cashier = scans, adds stamps/points, redeems; manager (Pro,
+        `staff_roles`) = also sees reports for their branches and manages cashiers there.
+      enum: [cashier, manager]
 
     Role:
       type: string
@@ -1214,6 +1824,10 @@ components:
           format: uuid
           description: Present for merchant_owner / operation_user.
         station: { type: string, description: Operation-user station label (e.g. Caja 1). }
+        name: { type: string, description: Display name for the console menu (profile name, else the e-mail's local part). }
+        staffRole: { $ref: "#/components/schemas/StaffRole" }
+        businessName: { type: string, description: The merchant's name (owner / operation user). }
+        tier: { $ref: "#/components/schemas/Tier" }
         locations:
           type: array
           items: { $ref: "#/components/schemas/LocationRef" }
@@ -1249,11 +1863,18 @@ components:
       properties:
         businessName: { type: string }
         ruc: { type: string, description: Ecuador tax id }
-        category: { type: string, enum: [cafe_restaurant, gym, retail, events, other] }
+        category:
+          type: string
+          description: "The signup offers cafe_restaurant, beauty (barbería o belleza), retail (tienda) and other; gym and events remain valid for older rows."
+          enum: [cafe_restaurant, beauty, gym, retail, events, other]
         city: { type: string }
         contactName: { type: string }
         contactEmail: { type: string, format: email }
+        contactPhone: { type: string, maxLength: 20, description: "WhatsApp, optional." }
         tier: { $ref: "#/components/schemas/Tier" }
+        billingPeriod:
+          $ref: "#/components/schemas/BillingPeriod"
+          description: Omitted = monthly (handler fallback; no OpenAPI default, see `language`).
         payment: { $ref: "#/components/schemas/PaymentSubmission" }
         language:
           type: string
@@ -1374,6 +1995,7 @@ components:
         city: { type: string }
         contactName: { type: string }
         contactEmail: { type: string, format: email }
+        contactPhone: { type: string }
         logoStorageKey: { type: string }
         subscription: { $ref: "#/components/schemas/Subscription" }
         createdAt: { type: string, format: date-time }
@@ -1381,16 +2003,23 @@ components:
 
     Subscription:
       type: object
-      required: [tier, paymentStatus, priceUsd, includedCards]
+      required: [tier, paymentStatus, billingPeriod, priceUsd, listPriceUsd, priceLocked, includedCards, includedNotifications, locationLimit]
       properties:
         tier: { $ref: "#/components/schemas/Tier" }
         paymentStatus: { $ref: "#/components/schemas/PaymentStatus" }
-        priceUsd: { type: number, description: The plan's monthly price, from the catalog. }
+        billingPeriod: { $ref: "#/components/schemas/BillingPeriod" }
+        priceUsd: { type: number, description: "What this subscription costs per billing period, IVA included — the locked price for an annual term, else the catalog price for the current phase." }
+        listPriceUsd: { type: number, description: List price for the same period (struck through while it differs from priceUsd). }
+        priceLocked: { type: boolean, description: True for an annual term whose price is fixed until nextChargeAt (renewal). }
         includedCards: { type: integer, description: Active cards included — NOT a cap; extra cards are billed. }
-        activeCards: { type: integer, description: Billing metric — cards currently active. }
+        includedNotifications: { type: integer }
+        locationLimit: { type: integer }
+        activeCards: { type: integer, description: "Billing metric — active, not paused, saved to a wallet; discount cards excluded (v3.0 §4)." }
         operationUserLimit: { type: integer, description: Absent = unlimited. }
         nextChargeAt: { type: string, format: date }
         lastPaymentAt: { type: string, format: date }
+        rejectionReason: { type: string, description: Present when paymentStatus = rejected. }
+        pendingChange: { $ref: "#/components/schemas/PlanChangeRequest" }
       additionalProperties: false
 
     SubscriptionUpdate:
@@ -1408,6 +2037,8 @@ components:
         name: { type: string }
         email: { type: string, format: email }
         station: { type: string, enum: [caja_1, caja_2, door_access] }
+        staffRole: { $ref: "#/components/schemas/StaffRole" }
+        lastSignInAt: { type: string, format: date-time, description: "Last sign-in (Supabase Auth); absent = never signed in." }
         locationIds:
           type: array
           items: { type: string, format: uuid }
@@ -1424,6 +2055,9 @@ components:
         name: { type: string }
         email: { type: string, format: email }
         station: { type: string, enum: [caja_1, caja_2, door_access] }
+        staffRole:
+          $ref: "#/components/schemas/StaffRole"
+          description: "manager needs `staff_roles` (Pro) → 402. Omitted on create = cashier."
         locationIds:
           type: array
           items: { type: string, format: uuid }
@@ -1436,6 +2070,9 @@ components:
         name: { type: string }
         email: { type: string, format: email }
         station: { type: string, enum: [caja_1, caja_2, door_access] }
+        staffRole:
+          $ref: "#/components/schemas/StaffRole"
+          description: "manager needs `staff_roles` (Pro) → 402. Omitted on create = cashier."
         locationIds:
           type: array
           items: { type: string, format: uuid }
@@ -1508,11 +2145,11 @@ components:
           type: integer
           minimum: 1
           maximum: 3650
+          deprecated: true
           description: >
-            Accumulation campaigns (loyalty_stamps / loyalty_points) only: a card with no
-            activity (no accrual or redemption, counted from enrolment) for this many days
-            counts as abandoned in ProgramMetrics.churnRate. Absent = 90. Ignored for
-            membership_pass. No `default:` on purpose — the handler applies 90.
+            DEPRECATED (Phase 18, O2): ignored on write. Inactivity is fixed at 90 days for
+            every merchant (cards pause after 90 days without use, keep their balance and
+            reactivate on scan); reads always return 90 for accumulation campaigns.
         appearance: { $ref: "#/components/schemas/ProgramAppearance" }
         wallets:
           type: array
@@ -1608,7 +2245,9 @@ components:
         holderName: { type: string, description: Display name (e.g. "María T."). }
         language: { type: string, enum: [es, en] }
         active: { type: boolean }
-        walletInstalled: { type: boolean, description: Drives the active-pass billing metric. }
+        walletInstalled: { type: boolean, description: "Google reports the pass saved by at least one user. Never-saved cards are neither billed nor notified (v3.0 §4)." }
+        paused: { type: boolean, description: "Paused after 90 days without use — not billed nor notified; keeps its balance; the next scan reactivates it (O2)." }
+        level: { type: integer, minimum: 1, description: "Accumulation campaigns: 1 + redemptions; never drops (v3.0 decision 12)." }
         createdAt: { type: string, format: date-time }
       additionalProperties: false
 
@@ -1656,9 +2295,11 @@ components:
     CardResolution:
       type: object
       required: [card, program]
+      description: Resolving a paused card reactivates it (the scan counts as use — O2).
       properties:
         card: { $ref: "#/components/schemas/Card" }
         program: { $ref: "#/components/schemas/Program" }
+        birthdayReward: { $ref: "#/components/schemas/BirthdayReward" }
       additionalProperties: false
 
     AccrueRequest:
@@ -1666,7 +2307,7 @@ components:
       required: [cardId, operationUserId]
       properties:
         cardId: { type: string, format: uuid }
-        operationUserId: { type: string, format: uuid }
+        operationUserId: { type: string, format: uuid, description: "Ignored since Phase 18: the operation is recorded under the authenticated caller (kept required for older clients)." }
         stamps: { type: integer, minimum: 1, description: Stamps to add (stamps mechanic). }
         amount: { type: number, minimum: 0, description: Purchase amount → points (points mechanic). }
         occurredAt:
@@ -1687,7 +2328,7 @@ components:
       required: [cardId, operationUserId]
       properties:
         cardId: { type: string, format: uuid }
-        operationUserId: { type: string, format: uuid }
+        operationUserId: { type: string, format: uuid, description: "Ignored since Phase 18: the operation is recorded under the authenticated caller (kept required for older clients)." }
         occurredAt: { type: string, format: date-time }
         locationId:
           type: string
@@ -1696,6 +2337,13 @@ components:
             Locale the scan happens at. Must be an active locale of the card's merchant and,
             for an operation user, one assigned to them (else 422). Optional — omitted when
             the merchant has no locales.
+        birthdayRewardId:
+          type: string
+          format: uuid
+          description: >-
+            Redeem this birthday reward (CardResolution.birthdayReward) instead of the
+            campaign reward — transaction kind birthday_redeem. 422 when it is not this
+            card's, already redeemed, or past validUntil.
       additionalProperties: false
 
     ValidateAccessRequest:
@@ -1703,7 +2351,7 @@ components:
       required: [cardId, operationUserId]
       properties:
         cardId: { type: string, format: uuid }
-        operationUserId: { type: string, format: uuid }
+        operationUserId: { type: string, format: uuid, description: "Ignored since Phase 18: the operation is recorded under the authenticated caller (kept required for older clients)." }
         occurredAt: { type: string, format: date-time }
       additionalProperties: false
 
@@ -1722,12 +2370,14 @@ components:
       properties:
         id: { type: string, format: uuid }
         cardId: { type: string, format: uuid }
-        kind: { type: string, enum: [accrue_stamps, accrue_points, redeem, validate_access, birthday_issue] }
+        kind: { type: string, enum: [accrue_stamps, accrue_points, redeem, validate_access, birthday_issue, birthday_redeem, reversal] }
         stampsDelta: { type: integer }
         pointsDelta: { type: integer }
         operationUserId: { type: string, format: uuid }
         locationId: { type: string, format: uuid }
         idempotencyKey: { type: string, format: uuid }
+        reversesId: { type: string, format: uuid, description: "kind = reversal: the operation it undoes." }
+        reversedAt: { type: string, format: date-time, description: Set on an operation that was undone. }
         createdAt: { type: string, format: date-time }
       additionalProperties: false
 
@@ -1758,7 +2408,14 @@ components:
     ProgramMetrics:
       type: object
       properties:
-        secondVisitRate30d: { type: number, description: "% of new customers returning within 30d." }
+        secondVisitRate30d: { type: number, description: "% of new customers returning within 30d (definition: SecondVisit)." }
+        secondVisitNew: { type: integer, description: Customers who enrolled in the last 30 days (the rate's denominator). }
+        secondVisitReturned: { type: integer, description: Of those, how many came back (the numerator). }
+        redemptions30d: { type: integer, description: Redemptions in the last 30 days. }
+        levelDistribution:
+          type: array
+          items: { $ref: "#/components/schemas/LevelCount" }
+          description: Exact count of active cards at each level, ascending (accumulation campaigns only).
         activeInstalledPasses: { type: integer }
         installsThisWeek: { type: integer }
         visits: { type: integer }
@@ -1827,6 +2484,141 @@ components:
             True when the client uploaded a manual-transfer receipt at signup — the admin
             can then open it via GET /admin/clients/{merchantId}/payment-proof.
         paymentProofUploadedAt: { type: string, format: date-time }
+        ruc: { type: string }
+        contactName: { type: string }
+        contactEmail: { type: string, format: email }
+        contactPhone: { type: string }
+        billingPeriod: { $ref: "#/components/schemas/BillingPeriod" }
+        notificationsUsed: { type: integer, description: Notifications billed this month. }
+        locationCount: { type: integer, description: Active branches. }
+        pendingVerification: { type: boolean, description: "\"Por verificar\": paymentStatus pending and a receipt uploaded." }
+        hasPendingPlanChange: { type: boolean, description: An upgrade request is waiting for review. }
+      additionalProperties: false
+
+    AdminClientDetail:
+      type: object
+      description: The platform's merchant file (board 18).
+      required: [client, merchant, subscription, usage, payments, activity]
+      properties:
+        client: { $ref: "#/components/schemas/AdminClient" }
+        merchant: { $ref: "#/components/schemas/Merchant" }
+        subscription: { $ref: "#/components/schemas/Subscription" }
+        usage: { $ref: "#/components/schemas/PlanUsage" }
+        ownerEmail: { type: string, format: email, description: The owner's login e-mail. }
+        payments:
+          type: array
+          items: { $ref: "#/components/schemas/Payment" }
+        planChange: { $ref: "#/components/schemas/PlanChangeRequest" }
+        activity:
+          type: array
+          items: { $ref: "#/components/schemas/ActivityEntry" }
+          description: Newest first, at most 50.
+      additionalProperties: false
+
+    ActivityEntry:
+      type: object
+      required: [id, action, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        action:
+          type: string
+          description: >
+            Stable code, rendered by the PWA: signed_up, proof_uploaded, activated, rejected,
+            payment_recorded, reminder_sent, plan_change_requested, plan_changed,
+            plan_change_rejected, suspended, reactivated, credentials_resent, location_added.
+        actorRole: { type: string, enum: [platform_admin, merchant_owner, operation_user, system] }
+        details: { type: object, additionalProperties: true }
+        createdAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    ClientActivation:
+      type: object
+      required: [rucVerified, proofVerified]
+      properties:
+        rucVerified: { type: boolean, description: Admin confirmed the RUC is active with the declared activity (SRI). Must be true. }
+        proofVerified: { type: boolean, description: Admin confirmed the receipt matches the chosen plan. Must be true. }
+      additionalProperties: false
+
+    ClientRejection:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 500, description: Sent to the merchant by e-mail. }
+      additionalProperties: false
+
+    Payment:
+      type: object
+      required: [id, kind, amountUsd, method, status, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [signup, renewal, plan_change, overage, other] }
+        tier: { $ref: "#/components/schemas/Tier" }
+        billingPeriod: { $ref: "#/components/schemas/BillingPeriod" }
+        amountUsd: { type: number, description: IVA included. }
+        method: { type: string, enum: [manual_transfer, deuna, card, cash, other] }
+        status: { type: string, enum: [pending, confirmed, rejected] }
+        hasReceipt: { type: boolean }
+        periodStart: { type: string, format: date }
+        periodEnd: { type: string, format: date }
+        paidAt: { type: string, format: date }
+        note: { type: string }
+        rejectionReason: { type: string }
+        createdAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    PaymentRecord:
+      type: object
+      required: [kind, amountUsd, method, paidAt]
+      properties:
+        kind: { type: string, enum: [renewal, overage, other] }
+        amountUsd: { type: number, minimum: 0 }
+        method: { type: string, enum: [manual_transfer, deuna, card, cash, other] }
+        paidAt: { type: string, format: date }
+        periodStart: { type: string, format: date }
+        note: { type: string, maxLength: 500 }
+      additionalProperties: false
+
+    PlanChangeCreate:
+      type: object
+      required: [tier, billingPeriod]
+      properties:
+        tier: { $ref: "#/components/schemas/Tier" }
+        billingPeriod: { $ref: "#/components/schemas/BillingPeriod" }
+      additionalProperties: false
+
+    PlanChangeRequest:
+      type: object
+      required: [id, fromTier, toTier, fromPeriod, toPeriod, direction, status, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        fromTier: { $ref: "#/components/schemas/Tier" }
+        toTier: { $ref: "#/components/schemas/Tier" }
+        fromPeriod: { $ref: "#/components/schemas/BillingPeriod" }
+        toPeriod: { $ref: "#/components/schemas/BillingPeriod" }
+        direction: { type: string, enum: [upgrade, downgrade] }
+        status: { type: string, enum: [awaiting_payment, pending_review, scheduled, applied, cancelled, rejected] }
+        amountUsd: { type: number, description: "Upgrade: what to transfer (the new period's price, IVA incl.)." }
+        effectiveAt: { type: string, format: date, description: "Downgrade: the date it applies (next charge)." }
+        hasReceipt: { type: boolean }
+        rejectionReason: { type: string }
+        createdAt: { type: string, format: date-time }
+        resolvedAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    PlatformSettings:
+      type: object
+      required: [pricingPhase, paymentSettings]
+      properties:
+        pricingPhase: { $ref: "#/components/schemas/PricingPhase" }
+        listPriceEffectiveAt: { type: string, format: date, description: Announced switch date (30 days' notice). }
+        paymentSettings: { $ref: "#/components/schemas/PaymentSettings" }
+      additionalProperties: false
+
+    PlatformSettingsUpdate:
+      type: object
+      properties:
+        pricingPhase: { $ref: "#/components/schemas/PricingPhase" }
+        listPriceEffectiveAt: { type: [string, "null"], format: date }
       additionalProperties: false
 
     PlatformStats:
@@ -1845,6 +2637,9 @@ components:
             pro: { type: integer }
           additionalProperties: false
         overdueCount: { type: integer }
+        pendingVerificationCount: { type: integer, description: "\"Por verificar\" (pending with a receipt) — also the sidebar badge." }
+        pendingPlanChangeCount: { type: integer }
+        suspendedCount: { type: integer }
       additionalProperties: false
 
     LocationRef:
@@ -1868,6 +2663,8 @@ components:
           type: string
           description: Query string to append to any enrol link so sign-ups are attributed here (e.g. "local=<id>").
         operationUserCount: { type: integer, description: Cashiers assigned to this locale. }
+        enrolledClients: { type: integer, description: Cards whose customer signed up here. }
+        visits30d: { type: integer, description: Effective accruals scanned here in the last 30 days. }
         createdAt: { type: string, format: date-time }
       additionalProperties: false
 
@@ -1929,28 +2726,103 @@ components:
     InactiveAutomation:
       type: object
       required: [enabled, days]
-      description: "\"Recordatorio de avance\" — Pro (automated_campaigns)."
+      description: >-
+        "Te extrañamos" — the basic reminder, every plan since v3.0 (decision 5). Fixed text
+        unless the merchant is Pro and set customTexts.inactive. Sent once per absence at
+        `days` without a visit. Suppressed while the Pro sequence is on.
       properties:
         enabled: { type: boolean }
-        days: { type: integer, minimum: 7, maximum: 90, multipleOf: 7, description: Days without a visit. }
+        days: { type: integer, minimum: 7, maximum: 89, description: "Days without a visit (before the 90-day pause)." }
+      additionalProperties: false
+
+    SequenceStep:
+      type: object
+      required: [day, text]
+      properties:
+        day: { type: integer, minimum: 7, maximum: 89, description: Days without a visit. }
+        text: { type: string, maxLength: 150, description: The merchant's own text (required, non-blank, while the sequence is enabled). }
+      additionalProperties: false
+
+    SequenceAutomation:
+      type: object
+      required: [enabled, steps]
+      description: >-
+        Pro (automated_campaigns): up to 3 reminders by days without a visit, each with its
+        own text; days strictly ascending. Stops as soon as the customer comes back. While
+        enabled it replaces the single "Te extrañamos" reminder.
+      properties:
+        enabled: { type: boolean }
+        steps:
+          type: array
+          minItems: 1
+          maxItems: 3
+          items: { $ref: "#/components/schemas/SequenceStep" }
+      additionalProperties: false
+
+    BirthdayAutomationSettings:
+      type: object
+      required: [enabled, benefit, validityDays]
+      description: >-
+        Pro (automated_campaigns): on the customer's birthday at 09:00 Ecuador time, a
+        birthday reward is attached to their most recently used active loyalty card and the
+        notice is sent. Redeemed at the till like a reward (RedeemRequest.birthdayRewardId),
+        valid `validityDays` days. Only customers who left their date (optional, asked after
+        saving the card) receive it.
+      properties:
+        enabled: { type: boolean }
+        benefit: { type: string, enum: [gift, discount] }
+        gift: { type: string, maxLength: 80, description: "benefit = gift: e.g. \"Un postre de la casa\". Required then." }
+        discountPercent: { type: integer, minimum: 1, maximum: 100, description: "benefit = discount: required then." }
+        validityDays: { type: integer, minimum: 1, maximum: 30 }
+      additionalProperties: false
+
+    CustomTexts:
+      type: object
+      description: >-
+        Pro (automated_campaigns): the merchant's own wording; omitted or empty = the fixed
+        template. Sending any non-empty text without Pro → 402. Placeholders: {negocio},
+        {premio}, {faltan}, {nivel}.
+      properties:
+        ready: { type: string, maxLength: 150 }
+        near: { type: string, maxLength: 150 }
+        inactive: { type: string, maxLength: 150 }
+        levelUp: { type: string, maxLength: 150 }
+        birthday: { type: string, maxLength: 150 }
+      additionalProperties: false
+
+    AutomationStat:
+      type: object
+      required: [sent, visits48h]
+      properties:
+        sent: { type: integer, description: Delivered in the last 30 days. }
+        visits48h: { type: integer, description: Of those, came back within 48 h. }
       additionalProperties: false
 
     NotificationAutomations:
       type: object
-      required: [balance, ready, near, milestone, expiry, inactive]
+      required: [balance, ready, near, inactive, sequence, levelUp, birthday]
       properties:
         balance: { $ref: "#/components/schemas/ToggleAutomation" }
         ready: { $ref: "#/components/schemas/ToggleAutomation" }
         near: { $ref: "#/components/schemas/NearAutomation" }
-        milestone: { $ref: "#/components/schemas/MilestoneAutomation" }
-        expiry: { $ref: "#/components/schemas/ExpiryAutomation" }
         inactive: { $ref: "#/components/schemas/InactiveAutomation" }
+        sequence: { $ref: "#/components/schemas/SequenceAutomation" }
+        levelUp:
+          $ref: "#/components/schemas/ToggleAutomation"
+          description: "\"Subiste de nivel\" on each redemption — Pro (automated_campaigns)."
+        birthday: { $ref: "#/components/schemas/BirthdayAutomationSettings" }
+        milestone:
+          $ref: "#/components/schemas/MilestoneAutomation"
+          description: DEPRECATED (Phase 18) — not part of the v3.0 set; ignored on write, always disabled on read.
+        expiry:
+          $ref: "#/components/schemas/ExpiryAutomation"
+          description: DEPRECATED (Phase 18, O2) — balances no longer expire; ignored on write, always disabled on read.
       additionalProperties: false
 
     CardLocationSettings:
       type: object
       required: [enrolled, topVisited]
-      description: Per-card (object) wallet locations, on top of the program's locales. At most 10 per card. Growth+ like all nearby points.
+      description: Per-card (object) wallet locations, on top of the program's locales. At most 10 per card. Every plan since v3.0 (nearby_notifications is in every plan).
       properties:
         enrolled: { type: boolean, description: Add the locale where the customer signed up. }
         topVisited: { type: boolean, description: Add the locales the customer visited most (cashier scans). }
@@ -1958,27 +2830,34 @@ components:
 
     NotificationSettingsUpdate:
       type: object
-      required: [automations, balanceExpiryDays, cardLocations]
+      required: [automations, cardLocations]
+      description: >-
+        Full replace. Pro-only parts (sequence / levelUp / birthday enabled, any custom
+        text) → 402 feature_not_in_plan without automated_campaigns.
       properties:
         automations: { $ref: "#/components/schemas/NotificationAutomations" }
+        customTexts: { $ref: "#/components/schemas/CustomTexts" }
         balanceExpiryDays:
           type: [integer, "null"]
-          minimum: 7
-          maximum: 365
-          description: >-
-            Merchant-wide (owner decision): stamps/points expire after this many days without
-            a visit — the balance goes to 0, earned rewards are kept. null = never expire.
+          deprecated: true
+          description: DEPRECATED (Phase 18, O2) — ignored; balances never expire.
         cardLocations: { $ref: "#/components/schemas/CardLocationSettings" }
       additionalProperties: false
 
     NotificationSettings:
       type: object
-      required: [automations, balanceExpiryDays, cardLocations, platformRules]
+      required: [automations, customTexts, cardLocations, platformRules, automationStats, birthdaysOnFile]
       properties:
         automations: { $ref: "#/components/schemas/NotificationAutomations" }
-        balanceExpiryDays: { type: [integer, "null"] }
+        customTexts: { $ref: "#/components/schemas/CustomTexts" }
+        balanceExpiryDays: { type: [integer, "null"], deprecated: true, description: Always null (O2). }
         cardLocations: { $ref: "#/components/schemas/CardLocationSettings" }
         platformRules: { $ref: "#/components/schemas/PlatformNotificationRules" }
+        automationStats:
+          type: object
+          description: Last-30-days result per automation type (keys ready, near, inactive, sequence, levelUp, birthday, balance); missing key = nothing sent.
+          additionalProperties: { $ref: "#/components/schemas/AutomationStat" }
+        birthdaysOnFile: { type: integer, description: Customers who left their birthday. }
       additionalProperties: false
 
     PlatformNotificationRules:
@@ -2048,7 +2927,7 @@ components:
       properties:
         id: { type: string, format: uuid }
         source: { type: string, enum: [manual, automation] }
-        type: { type: string, enum: [general, event, flash, balance, ready, near, milestone, expiry, inactive] }
+        type: { type: string, enum: [general, event, flash, balance, ready, near, milestone, expiry, inactive, sequence, level_up, birthday] }
         audience: { type: string, enum: [all, near, inactive, level, location, automatic] }
         levelMin: { type: integer }
         locationId: { type: string, format: uuid }
@@ -2083,4 +2962,214 @@ components:
             Opaque code of the seeded demo customer's active card (preferring the one in
             `programId`, else their most recent in any demo program), so the demo cashier
             can be pre-filled. Demo-only data; omitted when no seeded card exists.
+      additionalProperties: false
+
+    # --- Phase 18 -----------------------------------------------------------------------
+
+    ForgotPasswordRequest:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+        language: { type: string, enum: [es, en], description: Language of the e-mail; omitted = Spanish. }
+      additionalProperties: false
+
+    PasswordResetWithCode:
+      type: object
+      required: [email, code, newPassword]
+      properties:
+        email: { type: string, format: email }
+        code: { type: string, pattern: "^[0-9]{6}$" }
+        newPassword: { type: string, minLength: 8, maxLength: 72 }
+      additionalProperties: false
+
+    SecondVisit:
+      type: object
+      description: >
+        Second-visit rate, the console's first number (v3.0 decision 9). Cohort = customers
+        whose card was created in the window; returned = those with an effective accrual or
+        redemption on a later Ecuador calendar day than their enrolment (the first stamp
+        given at sign-up does not count). Undone operations never count. rate is null when
+        newCustomers = 0.
+      required: [newCustomers, returned]
+      properties:
+        rate: { type: [number, "null"], description: "0–100, one decimal." }
+        newCustomers: { type: integer }
+        returned: { type: integer }
+        previousRate: { type: [number, "null"], description: Same measure for the 30 days before (for the "+6 puntos" delta). }
+      additionalProperties: false
+
+    ProgramFigures:
+      type: object
+      required: [programId, activeCards, redemptions30d, newCards7d]
+      properties:
+        programId: { type: string, format: uuid }
+        activeCards: { type: integer, description: Active (not paused) cards. }
+        redemptions30d: { type: integer }
+        newCards7d: { type: integer }
+      additionalProperties: false
+
+    ReportSummary:
+      type: object
+      required: [secondVisit, redemptionsThisMonth, programs]
+      properties:
+        secondVisit: { $ref: "#/components/schemas/SecondVisit" }
+        redemptionsThisMonth: { type: integer, description: Redemptions in the current calendar month (Ecuador). }
+        programs:
+          type: array
+          items: { $ref: "#/components/schemas/ProgramFigures" }
+          description: One entry per campaign of the merchant (every status).
+      additionalProperties: false
+
+    ReportKpis:
+      type: object
+      required: [secondVisit, newCustomers, visits, redemptions]
+      properties:
+        secondVisit: { $ref: "#/components/schemas/SecondVisit" }
+        newCustomers: { type: integer, description: Cards created in the period. }
+        visits: { type: integer, description: Effective accruals (stamps or points) in the period. }
+        redemptions: { type: integer, description: Effective redemptions in the period. }
+      additionalProperties: false
+
+    CohortWeek:
+      type: object
+      required: [weekStart, newCustomers, returned, closed]
+      properties:
+        weekStart: { type: string, format: date, description: Monday, Ecuador time. }
+        newCustomers: { type: integer }
+        returned: { type: integer, description: Came back within 30 days of their own enrolment. }
+        rate: { type: [number, "null"], description: "0–100; null when newCustomers = 0." }
+        closed: { type: boolean, description: "False while some of the week's customers are still inside their 30 days (\"en curso\", drawn striped)." }
+      additionalProperties: false
+
+    CampaignReportRow:
+      type: object
+      required: [programId, name, type, visits, redemptions]
+      properties:
+        programId: { type: string, format: uuid }
+        name: { type: string }
+        type: { $ref: "#/components/schemas/ProgramType" }
+        visits: { type: integer }
+        redemptions: { type: integer }
+        secondVisitRate: { type: [number, "null"], description: Null for discount campaigns (single use). }
+      additionalProperties: false
+
+    LevelCount:
+      type: object
+      required: [level, count]
+      properties:
+        level: { type: integer, minimum: 1 }
+        count: { type: integer }
+      additionalProperties: false
+
+    BranchReportRow:
+      type: object
+      required: [locationId, name, newCustomers, visits]
+      properties:
+        locationId: { type: string, format: uuid }
+        name: { type: string }
+        newCustomers: { type: integer, description: Customers who signed up at this branch in the period. }
+        visits: { type: integer }
+        secondVisitRate: { type: [number, "null"] }
+      additionalProperties: false
+
+    ReportOverview:
+      type: object
+      required: [periodStart, periodEnd, weeks, kpis, cohorts, campaigns, levels]
+      properties:
+        periodStart: { type: string, format: date }
+        periodEnd: { type: string, format: date }
+        weeks: { type: integer, enum: [4, 8, 12] }
+        kpis: { $ref: "#/components/schemas/ReportKpis" }
+        cohorts:
+          type: array
+          items: { $ref: "#/components/schemas/CohortWeek" }
+          description: Oldest first, one per week of the period.
+        campaigns:
+          type: array
+          items: { $ref: "#/components/schemas/CampaignReportRow" }
+        levels:
+          type: array
+          items: { $ref: "#/components/schemas/LevelCount" }
+          description: Active accumulation cards per level, ascending.
+        branches:
+          type: array
+          items: { $ref: "#/components/schemas/BranchReportRow" }
+          description: Only with branch_reports (Pro) or for a manager (their branches).
+      additionalProperties: false
+
+    RecentOperation:
+      type: object
+      required: [id, cardId, kind, holderName, createdAt, undoable]
+      properties:
+        id: { type: string, format: uuid }
+        cardId: { type: string, format: uuid }
+        kind: { type: string, enum: [accrue_stamps, accrue_points, redeem, birthday_redeem] }
+        holderName: { type: string, description: "First name + initial (\"María T.\"), else \"Cliente\"." }
+        programName: { type: string }
+        stampsDelta: { type: integer }
+        pointsDelta: { type: integer }
+        locationId: { type: string, format: uuid }
+        reversed: { type: boolean }
+        undoable: { type: boolean, description: "True while POST /operations/{transactionId}/undo would succeed for the caller." }
+        createdAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    BirthdayReward:
+      type: object
+      required: [id, benefit, validUntil]
+      properties:
+        id: { type: string, format: uuid }
+        benefit: { type: string, description: "e.g. \"Un postre de la casa\" or \"20 % en toda la carta\"." }
+        validUntil: { type: string, format: date }
+      additionalProperties: false
+
+    CardBirthdayUpdate:
+      type: object
+      required: [cardId, token, day, month]
+      properties:
+        cardId: { type: string, format: uuid }
+        token: { type: string, description: "Either the card's opaque token (CardIssued.card.opaqueToken, right after enrolment) or the signed token of the birthday link printed on the back of the pass (/tarjeta/{cardId}?t=…, D15 keeps the opaque token off visible text)." }
+        day: { type: [integer, "null"], minimum: 1, maximum: 31 }
+        month: { type: [integer, "null"], minimum: 1, maximum: 12 }
+      additionalProperties: false
+
+    NotificationUpdate:
+      type: object
+      description: Partial NotificationCreate for a scheduled notification.
+      properties:
+        type: { type: string, enum: [general, event, flash] }
+        audience: { type: string, enum: [all, near, inactive, level, location] }
+        levelMin: { type: integer, minimum: 2, maximum: 50 }
+        locationId: { type: string, format: uuid }
+        title: { type: string, maxLength: 60 }
+        body: { type: string, minLength: 1, maxLength: 150 }
+        url: { type: [string, "null"], maxLength: 500 }
+        eventAt: { type: string, format: date-time }
+        flashHours: { type: integer, minimum: 1, maximum: 72 }
+        scheduledAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    EnrollPreview:
+      type: object
+      required: [programId, businessName, programName, type, campaignStatus, birthdayOffer]
+      properties:
+        programId: { type: string, format: uuid }
+        businessName: { type: string }
+        programName: { type: string }
+        type: { $ref: "#/components/schemas/ProgramType" }
+        mechanic: { $ref: "#/components/schemas/RewardMechanic" }
+        stampsForReward: { type: integer }
+        pointsForReward: { type: integer }
+        pointsPerDollar: { type: number }
+        reward: { type: string }
+        occasion: { type: string }
+        discountPercent: { type: integer }
+        validFrom: { type: string, format: date }
+        validUntil: { type: string, format: date }
+        campaignStatus: { $ref: "#/components/schemas/CampaignStatus" }
+        color: { type: string, description: Pass background colour (hex). }
+        logoUrl: { type: string }
+        backgroundUrl: { type: string }
+        birthdayOffer: { type: boolean, description: "The merchant gives a birthday gift (Pro, birthdays on): show the optional birthday step after saving." }
       additionalProperties: false

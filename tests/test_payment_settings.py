@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import conpass_common.payment_settings as payment_settings_mod
 import pytest
+from _p18_fake import FakeData
 from conpass_common.app import require_identity
 from conpass_common.auth import Identity
 from conpass_common.errors import NotConfigured
@@ -33,6 +34,7 @@ class _FakeMerchantsRepo:
         self.created_merchant: dict | None = None
         self.sub_calls: list[tuple] = []
         self.deleted: str | None = None
+        self.client = FakeData()        # payments ledger, activity log, platform settings
 
     def get_payment_settings(self):
         return self._settings_row
@@ -41,11 +43,12 @@ class _FakeMerchantsRepo:
         self.created_merchant = {**data, "id": M1, "created_at": "2026-08-01T00:00:00Z"}
         return self.created_merchant
 
-    def create_subscription(self, merchant_id, tier, *,
+    def create_subscription(self, merchant_id, tier, *, billing_period="monthly",
                              payment_proof_key=None, payment_proof_uploaded_at=None):
         self.sub_calls.append((merchant_id, tier, payment_proof_key, payment_proof_uploaded_at))
         return {
             "merchant_id": merchant_id, "tier": tier, "payment_status": "pending",
+            "billing_period": billing_period,
             "next_charge_at": None, "last_payment_at": None,
             "payment_proof_key": payment_proof_key,
             "payment_proof_uploaded_at": payment_proof_uploaded_at,
@@ -182,6 +185,10 @@ def test_onboard_accepts_and_persists_proof(monkeypatch):
     merchant_id, tier, proof_key, uploaded_at = repo.sub_calls[0]
     assert proof_key == "payment-proofs/xyz.pdf"
     assert uploaded_at is not None  # timestamp was stamped at write time
+    # the receipt also lands on the signup payment (the ledger that replaces the column)
+    payment = repo.client.tables["payments"][0]
+    assert payment["proof_storage_key"] == "payment-proofs/xyz.pdf"
+    assert payment["kind"] == "signup" and payment["status"] == "pending"
 
 
 def test_onboard_card_payment_does_not_require_proof(monkeypatch):
@@ -201,6 +208,7 @@ class _FakeAdminRepo:
         self._subs = {s["merchant_id"]: s for s in (subscriptions or [])}
         self._settings_row = settings_row or {}
         self.last_patch: dict | None = None
+        self.client = FakeData()
 
     def get_subscription(self, merchant_id):
         return self._subs.get(merchant_id)
@@ -257,6 +265,19 @@ def test_get_client_payment_proof_404_when_missing(monkeypatch):
     _identity(h.app, monkeypatch)
     resp = TestClient(h.app).get(f"/admin/clients/{M1}/payment-proof")
     assert resp.status_code == 404
+
+
+def test_get_client_payment_proof_prefers_the_signup_payment(monkeypatch):
+    h, repo = _seed_admin(monkeypatch, subscriptions=[
+        {"merchant_id": M1, "tier": "growth", "payment_status": "pending",
+         "payment_proof_key": "legacy.pdf"}])
+    repo.client.tables["payments"] = [{
+        "id": "p1", "merchant_id": M1, "kind": "signup", "proof_storage_key": "new.pdf",
+        "created_at": "2026-11-01T00:00:00Z"}]
+    monkeypatch.setattr(h, "presign_payment_proof_download", lambda key: f"https://s3/{key}")
+    _identity(h.app, monkeypatch)
+    body = TestClient(h.app).get(f"/admin/clients/{M1}/payment-proof").json()
+    assert body == {"url": "https://s3/new.pdf", "uploadedAt": "2026-11-01T00:00:00Z"}
 
 
 def test_get_client_payment_proof_returns_presigned_link(monkeypatch):

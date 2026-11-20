@@ -87,6 +87,7 @@ _LABELS: dict[str, dict[str, str]] = {
         "active": "Activa",
         "no_expiry": "Sin caducidad",
         "level": "NIVEL",
+        "birthday_link": "Déjanos tu cumpleaños",
         "expires": "SALDO VENCE",
         "more_info": "Más información",
     },
@@ -114,6 +115,7 @@ _LABELS: dict[str, dict[str, str]] = {
         "active": "Active",
         "no_expiry": "No expiry",
         "level": "LEVEL",
+        "birthday_link": "Add your birthday",
         "expires": "BALANCE EXPIRES",
         "more_info": "More information",
     },
@@ -447,6 +449,13 @@ class GoogleWalletProvider(WalletProvider):
                 "start": {"date": f"{content.valid_from[:10]}T00:00:00{_EC_OFFSET}"},
                 "end": {"date": f"{content.valid_until[:10]}T23:59:59{_EC_OFFSET}"},
             }
+        # Only when there is a link: update() is a full PUT, so leaving the key out clears a
+        # previous link, and an empty block would cost the self-contained save link ~30 chars.
+        if content.birthday_url:
+            obj["linksModuleData"] = {"uris": [{
+                "id": "birthday", "uri": content.birthday_url,
+                "description": _LABELS[lang]["birthday_link"],
+            }]}
         if content.accent_color and _HEX_RE.match(content.accent_color):
             obj["hexBackgroundColor"] = content.accent_color
         # No contentDescription on either image: cardTitle/header already say the same
@@ -516,6 +525,28 @@ class GoogleWalletProvider(WalletProvider):
             api.patch(
                 f"/genericObject/{provider_object_id}", json={"state": "INACTIVE"}
             ).raise_for_status()
+
+    def saved_cards(self, card_ids: list[str]) -> dict[str, bool]:
+        """`hasUsers` per card object (one token, one connection). 404 = never created, so
+        not saved; any other failure leaves that card out (retried on the next poll)."""
+        out: dict[str, bool] = {}
+        if not card_ids:
+            return out
+        with self._api() as api:
+            for card_id in card_ids:
+                try:
+                    resp = api.get(f"/genericObject/{self._issuer_id}.card_{card_id}")
+                except httpx.HTTPError:
+                    log.warning("hasUsers probe failed for card %s", card_id, exc_info=True)
+                    continue
+                if resp.status_code == 404:
+                    out[card_id] = False
+                elif resp.status_code == 200:
+                    out[card_id] = bool(resp.json().get("hasUsers"))
+                else:
+                    log.warning("hasUsers probe for card %s answered %s", card_id,
+                                resp.status_code)
+        return out
 
     def add_link(self, content: PassContent) -> str:
         """Regenerate the link without mutating anything (this serves a GET).

@@ -55,10 +55,11 @@ def _auto(**over):
     base = {"automations": {
         "balance": {"enabled": True}, "ready": {"enabled": True},
         "near": {"enabled": True, "stamps": 2, "points": 10},
-        "milestone": {"enabled": True, "every": 10},
-        "expiry": {"enabled": False, "warnDays": 7},
-        "inactive": {"enabled": False, "days": 28}},
-        "balanceExpiryDays": None, "cardLocations": {"enrolled": True, "topVisited": False}}
+        "inactive": {"enabled": True, "days": 28},
+        "sequence": {"enabled": False, "steps": [{"day": 30, "text": ""}]},
+        "levelUp": {"enabled": False},
+        "birthday": {"enabled": False, "benefit": "gift", "validityDays": 7}},
+        "cardLocations": {"enrolled": True, "topVisited": False}}
     base.update(over)
     return base
 
@@ -71,38 +72,39 @@ def test_settings_defaults_then_roundtrip(monkeypatch):
     r = c.get("/notifications/settings")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["automations"]["inactive"]["enabled"] is False
-    assert body["automations"]["expiry"] == {"enabled": True, "warnDays": 7}
+    assert body["automations"]["balance"]["enabled"] is False          # v3.0: off by default
+    assert body["automations"]["inactive"] == {"enabled": True, "days": 30}
+    assert body["automations"]["expiry"] == {"enabled": False, "warnDays": 7}
+    assert body["automations"]["milestone"]["enabled"] is False
     assert body["balanceExpiryDays"] is None
     assert body["platformRules"]["quietStart"] == "21:00"
     put = c.put("/notifications/settings", json=_auto(balanceExpiryDays=60))
     assert put.status_code == 200, put.text
     assert put.json()["automations"]["near"]["stamps"] == 2
-    assert c.get("/notifications/settings").json()["balanceExpiryDays"] == 60
-    assert db.rows("merchant_notification_settings")[0]["near_stamps"] == 2
+    again = c.get("/notifications/settings").json()
+    assert again["balanceExpiryDays"] is None                          # ignored on write
+    assert again["automations"]["balance"]["enabled"] is True
+    row = db.rows("merchant_notification_settings")[0]
+    assert row["near_stamps"] == 2 and row["balance_expiry_days"] is None
 
 
-def test_settings_inactive_needs_pro(monkeypatch):
-    c, _ = _svc(monkeypatch, tier="growth")
+def test_settings_inactive_is_on_every_plan(monkeypatch):
+    c, _ = _svc(monkeypatch, tier="starter")
+    r = c.put("/notifications/settings", json=_auto())
+    assert r.status_code == 200, r.text
+    assert r.json()["automations"]["inactive"] == {"enabled": True, "days": 28}
+
+
+def test_settings_retired_automations_are_ignored(monkeypatch):
+    c, db = _svc(monkeypatch)
     auto = _auto()
-    auto["automations"]["inactive"]["enabled"] = True
-    r = c.put("/notifications/settings", json=auto)
-    assert r.status_code == 402 and r.json()["code"] == "feature_not_in_plan"
-    assert r.json()["details"]["requiredTier"] == "pro"
-    c, _ = _svc(monkeypatch, tier="pro")
+    auto["automations"]["milestone"] = {"enabled": True, "every": 10}
+    auto["automations"]["expiry"] = {"enabled": True, "warnDays": 7}
     assert c.put("/notifications/settings", json=auto).status_code == 200
-
-
-def test_settings_expiry_validation(monkeypatch):
-    c, _ = _svc(monkeypatch)
-    on = _auto()
-    on["automations"]["expiry"]["enabled"] = True
-    assert c.put("/notifications/settings", json=on).status_code == 200    # inert default
-    bad = _auto(balanceExpiryDays=7)                                      # warn 7 >= 7
-    assert c.put("/notifications/settings", json=bad).status_code == 422
-    ok = _auto(balanceExpiryDays=30)
-    ok["automations"]["expiry"]["enabled"] = True
-    assert c.put("/notifications/settings", json=ok).status_code == 200
+    row = db.rows("merchant_notification_settings")[0]
+    assert row["milestone_on"] is False and row["expiry_on"] is False
+    shown = c.get("/notifications/settings").json()["automations"]
+    assert shown["milestone"]["enabled"] is False and shown["expiry"]["enabled"] is False
 
 
 def test_owner_only_and_demo_owner_allowed(monkeypatch):
@@ -235,13 +237,22 @@ def test_notifier_routes_jobs(monkeypatch):
     monkeypatch.setattr(n, "service_client", lambda: "db")
     monkeypatch.setattr(n.dispatch, "run_dispatch", lambda c: calls.append("dispatch") or {})
     monkeypatch.setattr(n.automations, "run_daily", lambda c: calls.append("daily") or {})
+    monkeypatch.setattr(n.automations, "run_birthdays", lambda c: calls.append("birthday") or {})
     monkeypatch.setattr(n.demo, "expire_demo_cards", lambda c: calls.append("demo") or {})
     monkeypatch.setattr(n.demo, "purge_demo_campaigns", lambda c: calls.append("purge") or {})
+    monkeypatch.setattr(n.wallet_saved, "poll_unsaved", lambda c: calls.append("saved") or 0)
+    monkeypatch.setattr(n.card_lifecycle, "pause_inactive_cards",
+                        lambda c: calls.append("pause") or 0)
+    monkeypatch.setattr(n.billing, "apply_scheduled_plan_changes",
+                        lambda c, d: calls.append("plans") or 0)
     n.handler({"job": "dispatch"}, None)
-    assert calls == ["purge", "dispatch"]
+    assert calls == ["purge", "saved", "dispatch"]
     calls.clear()
     n.handler({"job": "daily"}, None)
-    assert calls == ["demo", "daily", "dispatch"]
+    assert calls == ["demo", "pause", "plans", "daily", "dispatch"]
+    calls.clear()
+    n.handler({"job": "birthday"}, None)
+    assert calls == ["birthday", "dispatch"]
     with pytest.raises(ValueError):
         n.handler({"job": "bogus"}, None)
 

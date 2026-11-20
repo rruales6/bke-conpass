@@ -9,6 +9,7 @@ import smtplib
 import types
 
 import pytest
+from _p18_fake import FakeData
 from conpass_common import auth as auth_mod
 from conpass_common import provisioning as prov
 from conpass_common.app import require_identity
@@ -490,29 +491,29 @@ def _onboard_setup(monkeypatch, sender):
     return h, provisioned, _onboard_body(method="card")
 
 
-def test_onboard_sends_email_and_hides_password(monkeypatch):
+def test_onboard_sends_no_email_and_hides_password(monkeypatch):
+    """D21: the access details are e-mailed at ACTIVATION, never at signup."""
     sender = _Sender()
     h, provisioned, body = _onboard_setup(monkeypatch, sender)
     body["language"] = "en"
     resp = TestClient(h.app).post("/merchants", json=body)
     assert resp.status_code == 201, resp.text
     data = resp.json()
-    assert data["ownerInviteSent"] is True and data["ownerEmail"] == "ana@test.co"
+    assert data["ownerInviteSent"] is False and data["ownerEmail"] == "ana@test.co"
     assert "ownerTempPassword" not in data and PW not in resp.text
+    # the login still exists, flagged for a password change, in the chosen language
     assert provisioned["must_change_password"] is True and provisioned["language"] == "en"
-    to, subject, text, html = sender.sent[0]
-    assert to == "ana@test.co" and PW in text and PW in html
-    assert "ready" in subject.lower()               # English template
+    assert sender.sent == []
 
 
 def test_onboard_defaults_to_spanish(monkeypatch):
     sender = _Sender()
     h, provisioned, body = _onboard_setup(monkeypatch, sender)
     assert TestClient(h.app).post("/merchants", json=body).status_code == 201
-    assert provisioned["language"] == "es" and "Cámbiala" in sender.sent[0][2]
+    assert provisioned["language"] == "es" and sender.sent == []
 
 
-def test_onboard_email_failure_still_201(monkeypatch, caplog):
+def test_onboard_does_not_depend_on_the_mailer(monkeypatch, caplog):
     sender = _Sender(error=EmailDeliveryError("SMTPAuthenticationError"))
     h, _, body = _onboard_setup(monkeypatch, sender)
     resp = TestClient(h.app).post("/merchants", json=body)
@@ -528,6 +529,7 @@ def test_onboard_email_failure_still_201(monkeypatch, caplog):
 class _AdminRepo:
     def __init__(self, merchant=None, owner=None):
         self.merchant, self.owner = merchant, owner
+        self.client = FakeData()      # the activity log the resend writes to
 
     def get_merchant(self, mid):
         return self.merchant

@@ -34,6 +34,9 @@ class Identity:
     merchant_id: str | None = None
     station: str | None = None
     must_change_password: bool = False
+    # Phase 18: operation-user staff role from app_metadata (cashier | manager). OPTIMISTIC
+    # (token may be up to 1 h stale) — authorise manager powers with staff.manager_scope().
+    staff_role: str | None = None
 
     def require_role(self, *roles: str) -> None:
         if not any(r in self.roles for r in roles):
@@ -63,6 +66,7 @@ def _claims_to_identity(claims: dict) -> Identity:
         merchant_id=meta.get("merchant_id"),
         station=meta.get("station"),
         must_change_password=bool(meta.get("must_change_password")),
+        staff_role=meta.get("staff_role"),
     )
 
 

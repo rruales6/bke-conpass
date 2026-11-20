@@ -17,7 +17,7 @@ M1 = "22222222-2222-2222-2222-222222222222"
 C1 = "44444444-4444-4444-4444-444444444444"
 C2 = "44444444-4444-4444-4444-444444444445"
 P1 = "33333333-3333-3333-3333-333333333333"
-S = MerchantNotificationSettings()
+S = MerchantNotificationSettings(balance_on=True)    # balance is off by default (v3.0)
 NOW = datetime(2026, 11, 11, 15, 0, tzinfo=UTC)          # 10:00 Ecuador
 DAY = date(2026, 11, 11)
 
@@ -48,7 +48,7 @@ def test_balance_points_and_english():
     assert en == "You earned 1 stamp. You have 3 / 8: 5 to go for Un café gratis."
 
 
-def test_ready_near_milestone_expiry_inactive():
+def test_ready_near_inactive():
     assert templates.render("ready", "es", F()).startswith("Completaste tu tarjeta.")
     assert templates.render("ready", "en", F()).startswith("Card complete.")
     assert templates.render("near", "es", F(missing=1)) == (
@@ -56,15 +56,6 @@ def test_ready_near_milestone_expiry_inactive():
     assert templates.render("near", "es", F(missing=2)).startswith("Te faltan 2 sellos")
     assert templates.render("near", "en", F(missing=1, mechanic="points")) == (
         "Only 1 point to go for Un café gratis. Drop by today?")
-    assert templates.render("milestone", "es", F(n=10)) == (
-        "Esta es tu visita n.º 10. Gracias por volver a Café.")
-    assert templates.render("milestone", "en", F(n=10)).startswith("This is visit number 10.")
-    assert templates.render("expiry", "es", F(held=5, days=7)) == (
-        "Tus 5 sellos vencen en 7 días. Úsalos antes de perderlos.")
-    assert templates.render("expiry", "es", F(held=1, days=1)) == (
-        "Tu 1 sello vence en 1 día. Úsalo antes de perderlo.")
-    assert templates.render("expiry", "en", F(held=1, days=1)) == (
-        "Your 1 stamp expires in 1 day. Use it before you lose it.")
     assert templates.render("inactive", "es", F(held=3, target=8, days=28)).startswith(
         "Hace 28 días que no te vemos.")
     assert templates.render("inactive", "en", F(held=3, target=8, days=1)).startswith(
@@ -90,36 +81,32 @@ def ev(**kw):
     return au.AccrualEvent(**{**base, **kw})
 
 
-def test_choose_balance_by_default():
+def test_choose_balance_only_when_enabled():
     assert au.choose_event(ev(), S) == "balance"
+    assert au.choose_event(ev(), MerchantNotificationSettings()) is None   # off by default
 
 
-def test_priority_ready_over_milestone_over_near_over_balance():
-    # completes a reward on the 10th visit, also within near range -> ready wins
-    assert au.choose_event(ev(rewards_earned=1, accrual_count=10, before_held=7,
-                              after_held=0), S) == "ready"
-    # 10th visit, no reward, crossing near (missing 8-6=2 > 1? use before 5 -> after 7)
-    assert au.choose_event(ev(accrual_count=10, before_held=5, after_held=7), S) == "milestone"
+def test_priority_ready_over_near_over_balance():
+    # completes a reward while also in near range -> ready wins
+    assert au.choose_event(ev(rewards_earned=1, before_held=7, after_held=0), S) == "ready"
     assert au.choose_event(ev(before_held=5, after_held=7), S) == "near"
     assert au.choose_event(ev(before_held=1, after_held=2), S) == "balance"
 
 
+def test_milestone_is_retired():
+    on = MerchantNotificationSettings(balance_on=True, milestone_on=True, milestone_every=5)
+    assert au.choose_event(ev(accrual_count=10), on) == "balance"
+
+
 def test_disabled_automations_fall_through():
-    off = MerchantNotificationSettings(ready_on=False)
+    off = MerchantNotificationSettings(balance_on=True, ready_on=False)
     assert au.choose_event(ev(rewards_earned=1, after_held=0), off) == "balance"
-    nothing = MerchantNotificationSettings(balance_on=False, near_on=False,
-                                           milestone_on=False, ready_on=False)
+    nothing = MerchantNotificationSettings(balance_on=False, near_on=False, ready_on=False)
     assert au.choose_event(ev(), nothing) is None
 
 
-def test_milestone_every_n_accruals():
-    assert au.choose_event(ev(accrual_count=10), S) == "milestone"
-    assert au.choose_event(ev(accrual_count=20), S) == "milestone"
-    assert au.choose_event(ev(accrual_count=11), S) == "balance"
-
-
 def test_near_fires_only_when_crossing_the_threshold():
-    s2 = MerchantNotificationSettings(near_stamps=2)
+    s2 = MerchantNotificationSettings(near_stamps=2, balance_on=True)
     # 8 target: missing 4 -> 2 crosses (4 > 2 >= 2)
     assert au.choose_event(ev(before_held=4, after_held=6), s2) == "near"
     # already inside (missing 2 -> 1): not a crossing, plain balance
@@ -132,8 +119,10 @@ def test_near_fires_only_when_crossing_the_threshold():
 
 def test_near_points_uses_points_threshold():
     pts = ev(mechanic="points", target=100, before_held=60, after_held=92, gained=32)
-    assert au.choose_event(pts, MerchantNotificationSettings(near_points=10)) == "near"
-    assert au.choose_event(pts, MerchantNotificationSettings(near_points=5)) == "balance"
+    ten = MerchantNotificationSettings(near_points=10, balance_on=True)
+    five = MerchantNotificationSettings(near_points=5, balance_on=True)
+    assert au.choose_event(pts, ten) == "near"
+    assert au.choose_event(pts, five) == "balance"
 
 
 def test_no_target_means_no_balance_message():
@@ -210,22 +199,24 @@ def test_after_accrual_enqueues_localized_message(monkeypatch):
     db = FakeDB(
         cards=[{"id": C1, "language": "en", "program_id": P1}],
         programs=[{"id": P1, "reward": "Free coffee"}],
-        merchants=[{"id": M1, "business_name": "Café Vecino"}],
-        transactions=[{"id": str(i), "card_id": C1, "kind": "accrue_stamps"}
-                      for i in range(10)])
-    kind = au.after_accrual(db, ev(accrual_count=0), today=DAY)
-    assert kind == "milestone"          # 10 accruals counted from the DB
+        merchants=[{"id": M1, "business_name": "Café Vecino"}])
+    db.rows("merchant_notification_settings").append(
+        {"merchant_id": M1, **MerchantNotificationSettings(balance_on=True).as_row()})
+    kind = au.after_accrual(db, ev(), today=DAY)
+    assert kind == "balance"
     d = db.rows("notification_deliveries")[0]
     assert d["header"] == "Café Vecino"
-    assert d["body"] == "This is visit number 10. Thank you for coming back to Café Vecino."
+    assert d["body"] == "You earned 1 stamp. You have 4 / 8: 4 to go for Free coffee."
 
 
 def test_after_accrual_supersedes_stale_balance():
     db = FakeDB(cards=[{"id": C1, "language": "es", "program_id": P1}],
                 programs=[{"id": P1, "reward": "Café"}],
-                merchants=[{"id": M1, "business_name": "Café Vecino"}])
+                merchants=[{"id": M1, "business_name": "Café Vecino"}],
+                merchant_notification_settings=[
+                    {"merchant_id": M1, **MerchantNotificationSettings(balance_on=True).as_row()}])
     stale = _delivery(db, C1, "balance")
-    assert au.after_accrual(db, ev(accrual_count=3), today=DAY) == "balance"
+    assert au.after_accrual(db, ev(), today=DAY) == "balance"
     assert {r["id"]: r["status"] for r in db.rows("notification_deliveries")}[
         stale["id"]] == "superseded"
 
@@ -483,107 +474,86 @@ def card(cid=C1, stamps=3, days_ago=0, **kw):
     return au.CardInfo(**{**base, **kw})
 
 
-def test_window_predicates():
-    n, w = 30, 7
-    assert au.is_expired(NOW - timedelta(days=30), NOW, n)
-    assert not au.is_expired(NOW - timedelta(days=29), NOW, n)
-    assert au.in_expiry_warning_window(NOW - timedelta(days=23), NOW, n, w)       # edge in
-    assert not au.in_expiry_warning_window(NOW - timedelta(days=22), NOW, n, w)
-    assert not au.in_expiry_warning_window(NOW - timedelta(days=30), NOW, n, w)   # expired
+def test_inactive_window_predicate():
     assert au.in_inactive_window(NOW - timedelta(days=28), NOW, 28)
     assert au.in_inactive_window(NOW - timedelta(days=34), NOW, 28)
     assert not au.in_inactive_window(NOW - timedelta(days=35), NOW, 28)
     assert not au.in_inactive_window(NOW - timedelta(days=27), NOW, 28)
 
 
-def test_days_until_expiry_rounds_up_min_one():
-    assert au.days_until_expiry(NOW - timedelta(days=23, hours=1), NOW, 30) == 7
-    assert au.days_until_expiry(NOW - timedelta(days=29, hours=23), NOW, 30) == 1
-
-
-def test_plan_daily_selection():
-    s = MerchantNotificationSettings(balance_expiry_days=30, expiry_warn_days=7,
-                                     inactive_on=True, inactive_days=14)
-    cards = [card(C1, days_ago=31),                    # expires
-             card(C2, days_ago=25),                    # warned (5 days left)
-             card("c3", days_ago=15),                  # inactive reminder
-             card("c4", days_ago=2),                   # nothing
-             card("c5", stamps=0, days_ago=31),        # no balance: untouched
-             card("c6", days_ago=31, program_type="loyalty_points", stamps=0, points=50)]
-    plan = au.plan_daily(cards, s, NOW, inactive_allowed=True)
-    assert [c.card_id for c in plan.expire] == [C1, "c6"]
-    assert [(c.card_id, d) for c, d in plan.warn] == [(C2, 5)]
-    assert [c.card_id for c, _ in plan.inactive] == ["c3"]
-    assert au.plan_daily(cards, s, NOW, inactive_allowed=False).inactive == []
-
-
-def test_plan_daily_inert_without_window_and_respects_switches():
-    cards = [card(days_ago=400)]
-    p = au.plan_daily(cards, MerchantNotificationSettings(), NOW, inactive_allowed=True)
-    assert (p.expire, p.warn, p.inactive) == ([], [], [])
-    s = MerchantNotificationSettings(balance_expiry_days=30, expiry_on=False)
-    assert au.plan_daily([card(days_ago=25)], s, NOW, inactive_allowed=True).warn == []
+def test_plan_daily_inactive_selection():
+    s = MerchantNotificationSettings(inactive_on=True, inactive_days=14)
+    cards = [card(C1, days_ago=15),                    # reminder
+             card(C2, days_ago=2),                     # recent
+             card("c3", days_ago=400),                 # long gone: window passed
+             card("c4", stamps=0, days_ago=15)]        # an empty card is reminded too
+    plan = au.plan_daily(cards, s, NOW)
+    assert [c.card_id for c, _ in plan.inactive] == [C1, "c4"]
+    assert plan.sequence == []
+    off = MerchantNotificationSettings(inactive_on=False)
+    assert au.plan_daily(cards, off, NOW).inactive == []
 
 
 def test_dedupe_key_shape():
-    assert au.dedupe_key("expiry", C1, utc(2026, 10, 1, 3)) == f"expiry:{C1}:2026-10-01"
+    assert au.dedupe_key("inactive", C1, utc(2026, 10, 1, 3)) == f"inactive:{C1}:2026-10-01"
+    assert au.dedupe_key("sequence", C1, utc(2026, 10, 1, 3), 1) == (
+        f"sequence:{C1}:2026-10-01:1")
 
 
 # --------------------------------------------------------------------------- #
 # Daily job — run (I/O)
 # --------------------------------------------------------------------------- #
-def _daily_db(tier="pro", **settings):
-    st = {"merchant_id": M1, **MerchantNotificationSettings(**settings).as_row()}
-    old, warn, idle = (NOW - timedelta(days=d, hours=1) for d in (31, 25, 15))
-    db = FakeDB(
-        merchant_notification_settings=[st],
+def _daily_db(tier="starter", settings=True, **over):
+    idle, recent = (NOW - timedelta(days=d, hours=1) for d in (15, 2))
+    st = [{"merchant_id": M1, **MerchantNotificationSettings(
+        **{"inactive_days": 14, **over}).as_row()}] if settings else []
+    return FakeDB(
+        merchant_notification_settings=st,
         subscriptions=[{"merchant_id": M1, "tier": tier}],
-        merchants=[{"id": M1, "business_name": "Café Vecino"}],
-        programs=[{"id": P1, "reward": "Un café"}],
+        merchants=[{"id": M1, "business_name": "Café Vecino", "is_demo": False}],
+        programs=[{"id": P1, "reward": "Un café", "merchant_id": M1}],
         notifiable_cards=[
             {"card_id": cid, "merchant_id": M1, "program_id": P1,
              "program_type": "loyalty_stamps", "stamps": 3, "points": 0,
-             "stamps_for_reward": 8, "points_for_reward": None}
-            for cid in (C1, C2, "c3")],
+             "stamps_for_reward": 8, "points_for_reward": None, "level": 1}
+            for cid in (C1, C2)],
         card_last_activity=[
-            {"card_id": C1, "merchant_id": M1, "last_at": old.isoformat()},
-            {"card_id": C2, "merchant_id": M1, "last_at": warn.isoformat()},
-            {"card_id": "c3", "merchant_id": M1, "last_at": idle.isoformat()}],
-        cards=[{"id": cid, "merchant_id": M1, "language": lang, "stamps": 3, "points": 0}
-               for cid, lang in ((C1, "es"), (C2, "en"), ("c3", "es"))])
-    return db
+            {"card_id": C1, "merchant_id": M1, "last_at": idle.isoformat()},
+            {"card_id": C2, "merchant_id": M1, "last_at": recent.isoformat()}],
+        cards=[{"id": cid, "merchant_id": M1, "language": lang}
+               for cid, lang in ((C1, "es"), (C2, "en"))])
 
 
-def test_run_daily_expires_warns_and_dedupes():
-    db = _daily_db(balance_expiry_days=30, inactive_on=True, inactive_days=14)
-    pushed = []
-    totals = au.run_daily(db, NOW, push=lambda c, cid: pushed.append(cid))
-    assert totals["expired"] == 1 and totals["warned"] == 1 and totals["inactive"] == 1
-    card1 = next(r for r in db.rows("cards") if r["id"] == C1)
-    assert (card1["stamps"], card1["points"]) == (0, 0)
-    audit = db.rows("balance_expirations")[0]
-    assert (audit["card_id"], audit["stamps_expired"], audit["merchant_id"]) == (C1, 3, M1)
-    assert pushed == [C1]
-    bodies = {d["card_id"]: d for d in db.rows("notification_deliveries")}
-    assert bodies[C2]["body"].startswith("Your 3 stamps expire in 5 days")
-    assert bodies[C2]["dedupe_key"].startswith(f"expiry:{C2}:")
-    assert bodies["c3"]["dedupe_key"].startswith("inactive:c3:")
-    # second run (same day): nothing to expire (now 0), nothing new inserted
-    again = au.run_daily(db, NOW, push=lambda c, cid: None)
-    assert again["expired"] == 0 and again["warned"] == 0 and again["inactive"] == 0
-    assert len(db.rows("notification_deliveries")) == 2
+def test_run_daily_inactive_on_every_plan_and_dedupes():
+    db = _daily_db(tier="starter")
+    totals = au.run_daily(db, NOW)
+    assert totals["inactive"] == 1 and totals["merchants"] == 1
+    d = db.rows("notification_deliveries")[0]
+    assert d["card_id"] == C1 and d["dedupe_key"].startswith(f"inactive:{C1}:")
+    assert d["body"].startswith("Hace 15 días que no te vemos.")
+    assert au.run_daily(db, NOW)["inactive"] == 0           # same absence: nothing new
+    assert len(db.rows("notification_deliveries")) == 1
 
 
-def test_run_daily_inactive_needs_pro_and_push_failure_is_swallowed():
-    db = _daily_db(tier="growth", balance_expiry_days=30, inactive_on=True, inactive_days=14)
-
-    def boom(c, cid):
-        raise RuntimeError("wallet")
-    totals = au.run_daily(db, NOW, push=boom)
-    assert totals["expired"] == 1 and totals["inactive"] == 0 and totals["errors"] == 0
+def test_run_daily_visits_merchants_without_a_settings_row():
+    db = _daily_db(settings=False)                          # defaults: inactive on at 30 days
+    db.rows("card_last_activity")[0]["last_at"] = (NOW - timedelta(days=31)).isoformat()
+    assert au.run_daily(db, NOW)["inactive"] == 1
 
 
-def test_run_daily_skips_merchants_with_nothing_enabled():
-    db = _daily_db()          # defaults: no expiry window, inactive off
-    assert au.run_daily(db, NOW, push=lambda *a: None)["merchants"] == 0
+def test_run_daily_skips_off_and_demo_merchants():
+    assert au.run_daily(_daily_db(inactive_on=False), NOW)["inactive"] == 0
+    db = _daily_db()
+    db.rows("merchants")[0]["is_demo"] = True
+    assert au.run_daily(db, NOW)["merchants"] == 0
     assert db.rows("notification_deliveries") == []
+
+
+def test_run_daily_isolates_a_failing_merchant(monkeypatch):
+    db = _daily_db()
+
+    def boom(*a, **k):
+        raise RuntimeError("db")
+    monkeypatch.setattr(au, "run_daily_for_merchant", boom)
+    totals = au.run_daily(db, NOW)
+    assert totals["errors"] == 1 and totals["merchants"] == 0

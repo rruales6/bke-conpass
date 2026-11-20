@@ -4,6 +4,7 @@ mocked: a tiny fake repo plus monkeypatched provisioning / presign helpers, so n
 Supabase or AWS access is needed. Uses monkeypatch so patches never leak."""
 from __future__ import annotations
 
+from _p18_fake import FakeData
 from conpass_common.app import require_identity
 from conpass_common.auth import Identity
 from fastapi.testclient import TestClient
@@ -27,6 +28,9 @@ class _FakeMerchantsRepo:
     def __init__(self, op_user):
         self._op = op_user
         self.deleted_profile: tuple | None = None
+        # `staff.manager_scope` re-reads the caller's profile and plan from the DB
+        self.client = FakeData(profiles=[{"user_id": U1, "merchant_id": M1,
+                                          "role": "operation_user", "staff_role": "cashier"}])
 
     def get_operation_user(self, merchant_id, user_id):
         if self._op and self._op["user_id"] == user_id and self._op["merchant_id"] == merchant_id:
@@ -61,7 +65,7 @@ def test_edit_operation_user_merges_fields(monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body == {"id": OP, "name": "Lucía Mora", "email": "lucia@x.co", "station": "caja_2",
-                    "locationIds": []}
+                    "staffRole": "cashier", "locationIds": []}
     assert calls["uid"] == OP and calls["station"] == "caja_2"
 
 

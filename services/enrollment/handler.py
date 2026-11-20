@@ -6,19 +6,23 @@ card. Wallet add-links are filled by the WalletProvider in Phase 4 (Google).
 """
 from __future__ import annotations
 
+import calendar
 import logging
+import secrets
 from datetime import date, timedelta
 from enum import Enum
 from typing import Annotated
 
 from conpass_common import create_app, lambda_handler, wallet_sync
+from conpass_common.assets import public_asset_url
 from conpass_common.campaigns import SEASONAL, STATUS_DISABLED, campaign_status, require_active
-from conpass_common.cards import new_opaque_token
+from conpass_common.card_links import verify_birthday_link_token
+from conpass_common.cards import card_flags, new_opaque_token
 from conpass_common.db import service_client
 from conpass_common.errors import NotFound, ValidationFailed
 from conpass_common.idempotency import IdempotencyStore, StoredResponse, run_idempotent
 from conpass_common.locations import active_locations
-from conpass_common.models import EnrollmentRequest
+from conpass_common.models import CardBirthdayUpdate, EnrollmentRequest
 from conpass_common.providers import get_wallet_provider
 from fastapi import Header
 from fastapi.responses import JSONResponse
@@ -78,6 +82,7 @@ def _card_issued(card: dict, program: dict, wallet_links: dict | None = None) ->
             "language": card.get("language", "es"),
             "active": card.get("active", True),
             "walletInstalled": card.get("wallet_installed", False),
+            **card_flags(card),
             "createdAt": card["created_at"],
         },
         "walletLinks": wallet_links or {},
@@ -119,6 +124,34 @@ def _enrolled_location_id(merchant_id: str, location_id) -> str | None:
     except Exception:  # noqa: BLE001 - attribution is optional
         log.warning("enrolled location lookup failed", exc_info=True)
     return None
+
+
+@app.get("/programs/{program_id}/enroll")
+def enroll_preview(program_id: str):
+    """Public (Phase 18, board 09): the card the customer is about to save. Membership passes
+    are parked (owner) and answer 404 like an unknown program."""
+    repo = get_repo()
+    p = repo.get_program(program_id)
+    if p is None or p.get("type") == "membership_pass":
+        raise NotFound("program not found")
+    merchant = repo.get_merchant(p["merchant_id"]) or {}
+    loyalty = p["type"] in ("loyalty_stamps", "loyalty_points")
+    out = {
+        "programId": p["id"], "businessName": merchant.get("business_name") or "",
+        "programName": p["name"], "type": p["type"], "mechanic": p.get("mechanic"),
+        "stampsForReward": p.get("stamps_for_reward"),
+        "pointsForReward": p.get("points_for_reward"),
+        "pointsPerDollar": float(p["points_per_dollar"]) if p.get("points_per_dollar") else None,
+        "reward": p.get("reward"), "occasion": p.get("occasion"),
+        "discountPercent": p.get("discount_percent"),
+        "validFrom": str(p["valid_from"])[:10] if p.get("valid_from") else None,
+        "validUntil": str(p["valid_until"])[:10] if p.get("valid_until") else None,
+        "campaignStatus": campaign_status(p), "color": p.get("color"),
+        "logoUrl": public_asset_url(p.get("icon_storage_key")),
+        "backgroundUrl": public_asset_url(p.get("background_storage_key")),
+        "birthdayOffer": bool(loyalty and repo.birthday_offer(p["merchant_id"])),
+    }
+    return {k: v for k, v in out.items() if v is not None}
 
 
 @app.post("/programs/{program_id}/enroll")
@@ -163,8 +196,10 @@ def enroll_customer(
             "full_name": body.fullName,
             "email": body.email,
             "phone": body.phone,
-            "birthday": body.birthday.isoformat() if body.birthday else None,
-            "consent": bool(body.consent),
+            # D15: only day + month are kept; the year is dropped here.
+            "birthday_day": body.birthday.day if body.birthday else None,
+            "birthday_month": body.birthday.month if body.birthday else None,
+            "consent": body.consent is True,      # absent -> false (never pre-ticked)
         })
 
         # Welcome bonus seeds the mechanic's balance; membership sets a validity window.
@@ -201,6 +236,39 @@ def enroll_customer(
                             endpoint="enroll", payload=body.model_dump(mode="json"),
                             compute=compute)
     return JSONResponse(status_code=result.status, content=result.body)
+
+
+@app.put("/programs/{program_id}/enroll/birthday", status_code=204)
+def set_card_birthday(program_id: str, body: CardBirthdayUpdate):
+    """Public. The card's opaque token (the QR secret), or the signed token of the pass-back
+    birthday link (card_links, D15), authorises it. Every failed check is
+    the same 404, so nothing reveals whether the card, the program or the token was wrong."""
+    repo = get_repo()
+    card = repo.get_card(str(body.cardId))
+    if (card is None or card.get("program_id") != program_id
+            or not (secrets.compare_digest(str(card.get("opaque_token") or "").encode(),
+                                           body.token.encode())
+                    or verify_birthday_link_token(str(body.cardId), body.token))):
+        raise NotFound("card not found")
+    day, month = body.day, body.month
+    if (day is None) != (month is None):
+        raise ValidationFailed("day and month must be sent together",
+                               details={"reason": "invalid_birthday"})
+    if day is not None and month is not None and not (
+            1 <= month <= 12 and 1 <= day <= calendar.monthrange(2024, month)[1]):
+        # 2024 is a leap year: 29 February is accepted.
+        raise ValidationFailed("that day does not exist in that month",
+                               details={"reason": "invalid_birthday"})
+    patch = {"birthday_day": day, "birthday_month": month}
+    customer_id = card.get("customer_id")
+    if customer_id:
+        repo.update_customer(customer_id, patch)
+    elif day is not None:
+        # An anonymous card (no customer row): create one for this merchant and link it.
+        customer = repo.create_customer({"merchant_id": card["merchant_id"],
+                                         "consent": False, **patch})
+        repo.link_customer(card["id"], customer["id"])
+    return None
 
 
 handler = lambda_handler(app)

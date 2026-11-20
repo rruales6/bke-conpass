@@ -101,13 +101,15 @@ class PassContent:
     logo_url: str | None = None
     background_url: str | None = None
     # Phase 16 — notifications:
-    level: int | None = None                 # loyalty: 1 + rewards ever reached
+    level: int | None = None                 # loyalty: cards.level (1 + redemptions)
     balance_expires_on: str | None = None    # ISO date the balance expires (inactivity)
     messages: tuple[PassMessage, ...] = ()   # back-of-pass messages, newest first (DB-derived)
     # Nearby points. None = leave the vendor's current value alone is NOT supported by a
     # full PUT, so callers always pass the real list ([] = none / plan without nearby).
     merchant_locations: tuple[tuple[float, float], ...] = ()   # program/class level, <= 10
     card_locations: tuple[tuple[float, float], ...] = ()       # per card/object, <= 10
+    # Phase 18 — signed link to the optional birthday form (Pro, birthdays on), back of pass.
+    birthday_url: str | None = None
     extra: dict = field(default_factory=dict)
 
 
@@ -146,6 +148,11 @@ class WalletProvider(ABC):
         """Add `message` to the back of an issued pass; with `notify`, also push it to the
         holder's lock screen. Raises WalletQuotaExceeded when the vendor's per-pass
         notification limit is hit."""
+
+    def saved_cards(self, card_ids: list[str]) -> dict[str, bool]:
+        """Phase 18: which of these cards' passes a holder has saved (Google `hasUsers`).
+        Cards whose state could not be read are left out. Vendors that cannot tell return {}."""
+        return {}
 
     @abstractmethod
     def sync_program(self, content: PassContent) -> None:
@@ -200,7 +207,8 @@ def build_pass_content(
         accent_color=program.get("color"),
         logo_url=public_asset_url(program.get("icon_storage_key")),
         background_url=public_asset_url(program.get("background_storage_key")),
-        level=(1 + (card.get("rewards_available") or 0) + (card.get("rewards_redeemed") or 0)
+        # Phase 18 (D21): level = 1 + redemptions, persisted on the card, never drops.
+        level=(int(card.get("level") or 1)
                if program["type"] in ("loyalty_stamps", "loyalty_points") else None),
         **extra_fields,   # Phase 16: messages / locations / balance_expires_on (wallet_sync)
     )

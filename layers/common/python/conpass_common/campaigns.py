@@ -10,14 +10,15 @@ ACCUMULATION_TYPES = ("loyalty_stamps", "loyalty_points")
 
 
 def inactivity_days(program: dict) -> int | None:
-    """The abandonment window of an accumulation campaign (stored value, else 90).
+    """The abandonment window of an accumulation campaign: always 90 since Phase 18 (D21, O2 —
+    the per-campaign field is retired; any stored value is ignored).
 
-    A membership pass has nothing to abandon, so it has no window: None (and the API
-    omits the field).
+    A membership pass or a discount campaign has nothing to abandon, so it has no window:
+    None (and the API omits the field).
     """
     if program.get("type") not in ACCUMULATION_TYPES:
         return None
-    return program.get("inactivity_days") or DEFAULT_INACTIVITY_DAYS
+    return DEFAULT_INACTIVITY_DAYS
 
 
 def inactivity_fields(program: dict) -> dict:

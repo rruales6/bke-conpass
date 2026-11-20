@@ -49,9 +49,47 @@ class AdminRepository:
         rows = self._c.table("merchant_active_passes").select("*").execute().data
         return {r["merchant_id"]: r["active_pass_count"] for r in rows}
 
-    # --- platform payment settings (no admin-side GET: the public /payment-settings
-    # endpoint already serves the same shape and needs no auth, so the console reads
-    # through that instead of duplicating a fetch here) ---
+    def active_location_counts(self) -> dict[str, int]:
+        """merchant_id -> active branches, for every merchant in one query."""
+        counts: dict[str, int] = {}
+        rows = (self._c.table("merchant_locations").select("merchant_id")
+                .eq("active", True).execute().data or [])
+        for r in rows:
+            counts[r["merchant_id"]] = counts.get(r["merchant_id"], 0) + 1
+        return counts
+
+    def signup_payments(self) -> dict[str, dict]:
+        """merchant_id -> the latest signup payment (the receipt to verify), one query."""
+        rows = (self._c.table("payments").select("*").eq("kind", "signup")
+                .order("created_at", desc=True).execute().data or [])
+        latest: dict[str, dict] = {}
+        for r in rows:               # newest first: keep the first seen per merchant
+            latest.setdefault(r["merchant_id"], r)
+        return latest
+
+    def merchants_with_review_pending(self) -> set[str]:
+        """Merchants with a plan-change request in pending_review, one query."""
+        rows = (self._c.table("plan_change_requests").select("merchant_id")
+                .eq("status", "pending_review").execute().data or [])
+        return {r["merchant_id"] for r in rows}
+
+    # --- platform settings (singleton, id = true) ---
+    def get_platform_settings(self) -> dict | None:
+        rows = self._c.table("platform_settings").select("*").eq("id", True).execute().data
+        return rows[0] if rows else None
+
+    def update_platform_settings(self, patch: dict) -> dict:
+        rows = self._c.table("platform_settings").update(patch).eq("id", True).execute().data
+        if rows:
+            return rows[0]
+        return self._c.table("platform_settings").insert({"id": True, **patch}).execute().data[0]
+
+    def get_payment_settings(self) -> dict | None:
+        rows = (self._c.table("platform_payment_settings").select("*")
+                .eq("id", True).limit(1).execute().data)
+        return rows[0] if rows else None
+
+    # --- platform payment details (read by GET /admin/platform-settings, edited here) ---
     def update_payment_settings(self, patch: dict) -> dict:
         return (self._c.table("platform_payment_settings").update(patch)
                 .eq("id", True).execute().data[0])

@@ -5,6 +5,7 @@ Supabase Data API client supports the query-builder chains these handlers use
 test_wallet.py. Uses monkeypatch so patches never leak across modules."""
 from __future__ import annotations
 
+from conpass_common import wallet_sync
 from conpass_common.app import require_identity
 from conpass_common.auth import Identity
 from fastapi.testclient import TestClient
@@ -271,12 +272,19 @@ def _admin_tables():
     }
 
 
-def test_admin_clients_join(monkeypatch):
+def _admin_handler(monkeypatch):
+    from _p18_fake import FakeData
+
     from services.admin import handler as h
 
-    tables = _admin_tables()
-    monkeypatch.setattr(h, "get_repo", lambda: h.AdminRepository(_FakeClient(tables)))
+    data = FakeData(**_admin_tables())
+    monkeypatch.setattr(h, "get_repo", lambda: h.AdminRepository(data))
     _admin_identity(h.app, monkeypatch)
+    return h, data
+
+
+def test_admin_clients_join(monkeypatch):
+    h, _ = _admin_handler(monkeypatch)
 
     r = TestClient(h.app).get("/admin/clients")
     assert r.status_code == 200
@@ -288,18 +296,20 @@ def test_admin_clients_join(monkeypatch):
     assert body[0]["city"] == "Cuenca"
     assert body[0]["tier"] == "starter"
     assert body[0]["paymentStatus"] == "overdue"
-    assert body[0]["priceUsd"] == 4.99
+    assert body[0]["priceUsd"] == 5.99               # v3.0 Starter launch price, IVA included
     assert body[0]["includedCards"] == 200
     assert body[0]["activeCards"] == 0
-    assert body[0]["estimatedMonthlyUsd"] == 4.99
+    assert body[0]["estimatedMonthlyUsd"] == 5.99
+    assert body[0]["billingPeriod"] == "monthly"
+    assert body[0]["pendingVerification"] is False and body[0]["hasPendingPlanChange"] is False
     assert "lastPaymentAt" not in body[0]
 
     c1 = next(c for c in body if c["merchantId"] == M1)
     assert c1["tier"] == "growth"
-    assert c1["priceUsd"] == 14.99
+    assert c1["priceUsd"] == 17.99
     assert c1["activeCards"] == 120
     assert c1["includedCards"] == 1000
-    assert c1["estimatedMonthlyUsd"] == 14.99     # 120 < 1000 included -> no overage
+    assert c1["estimatedMonthlyUsd"] == 17.99     # 120 < 1000 included -> no overage
     assert c1["nextChargeAt"] == "2026-08-01"
     assert c1["lastPaymentAt"] == "2026-07-01"
 
@@ -313,28 +323,23 @@ def test_admin_clients_requires_platform_admin(monkeypatch):
 
 
 def test_admin_stats_aggregation(monkeypatch):
-    from services.admin import handler as h
-
-    tables = _admin_tables()
-    monkeypatch.setattr(h, "get_repo", lambda: h.AdminRepository(_FakeClient(tables)))
-    _admin_identity(h.app, monkeypatch)
+    h, _ = _admin_handler(monkeypatch)
 
     r = TestClient(h.app).get("/admin/stats")
     assert r.status_code == 200
     body = r.json()
     assert body["activeClients"] == 1          # only M1 is paid
-    assert body["mrrUsd"] == 14.99              # paid clients only (M1, growth, no overage)
-    assert body["subscriptionMrrUsd"] == 14.99
+    assert body["mrrUsd"] == 17.99              # paid clients only (M1, growth, no overage)
+    assert body["subscriptionMrrUsd"] == 17.99
     assert body["tierCounts"] == {"starter": 1, "growth": 1, "pro": 0}
     assert body["overdueCount"] == 1
+    assert body["pendingVerificationCount"] == 0
+    assert body["pendingPlanChangeCount"] == 0
+    assert body["suspendedCount"] == 0
 
 
 def test_admin_subscription_patch_updates_and_returns_active_pass_count(monkeypatch):
-    from services.admin import handler as h
-
-    tables = _admin_tables()
-    monkeypatch.setattr(h, "get_repo", lambda: h.AdminRepository(_FakeClient(tables)))
-    _admin_identity(h.app, monkeypatch)
+    h, _ = _admin_handler(monkeypatch)
 
     r = TestClient(h.app).patch(
         f"/admin/clients/{M2}/subscription",
@@ -344,17 +349,16 @@ def test_admin_subscription_patch_updates_and_returns_active_pass_count(monkeypa
     assert body["paymentStatus"] == "paid"
     assert body["tier"] == "starter"            # unchanged field preserved
     assert body["activeCards"] == 0             # no row in merchant_active_passes for M2
-    assert body["priceUsd"] == 4.99
+    assert body["priceUsd"] == 5.99
+    assert body["billingPeriod"] == "monthly" and body["priceLocked"] is False
     assert body["includedCards"] == 200
-    assert body["operationUserLimit"] == 2
+    assert body["locationLimit"] == 1
+    assert "operationUserLimit" not in body     # cashiers are unlimited on every plan
 
 
 def test_admin_subscription_patch_tier_change(monkeypatch):
-    from services.admin import handler as h
-
-    tables = _admin_tables()
-    monkeypatch.setattr(h, "get_repo", lambda: h.AdminRepository(_FakeClient(tables)))
-    _admin_identity(h.app, monkeypatch)
+    h, data = _admin_handler(monkeypatch)
+    monkeypatch.setattr(wallet_sync, "sync_merchant_classes", lambda c, mid: None)
 
     r = TestClient(h.app).patch(
         f"/admin/clients/{M1}/subscription",
@@ -364,17 +368,14 @@ def test_admin_subscription_patch_tier_change(monkeypatch):
     assert body["tier"] == "pro"
     assert body["paymentStatus"] == "paid"      # unchanged
     assert body["activeCards"] == 120
-    assert body["priceUsd"] == 24.99
-    assert "operationUserLimit" not in body     # pro = unlimited
-    assert tables["subscriptions"][0]["tier"] == "pro"
+    assert body["priceUsd"] == 57.99
+    assert body["locationLimit"] == 10
+    assert "operationUserLimit" not in body
+    assert data.tables["subscriptions"][0]["tier"] == "pro"
 
 
 def test_admin_subscription_patch_missing_merchant_404(monkeypatch):
-    from services.admin import handler as h
-
-    tables = _admin_tables()
-    monkeypatch.setattr(h, "get_repo", lambda: h.AdminRepository(_FakeClient(tables)))
-    _admin_identity(h.app, monkeypatch)
+    h, _ = _admin_handler(monkeypatch)
 
     other = "77777777-7777-7777-7777-777777777777"
     r = TestClient(h.app).patch(

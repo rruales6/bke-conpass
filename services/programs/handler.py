@@ -2,17 +2,19 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 
 from conpass_common import CurrentIdentity, create_app, lambda_handler, wallet_sync
 from conpass_common.assets import presign_upload, public_asset_url
 from conpass_common.campaigns import (
     ACCUMULATION_TYPES,
+    DEFAULT_INACTIVITY_DAYS,
     SEASONAL,
     campaign_fields,
-    inactivity_days,
-    inactivity_fields,
+    today_ec,
     validate_seasonal,
 )
+from conpass_common.config import settings
 from conpass_common.db import service_client
 from conpass_common.demo import DEMO_MAX_VISITOR_CAMPAIGNS, demo_expires_at
 from conpass_common.errors import Forbidden, NotFound, RateLimited, ValidationFailed
@@ -23,7 +25,9 @@ from .repository import ProgramsRepository
 
 log = logging.getLogger(__name__)
 
-ENROLL_BASE = "https://conpass.cards/enroll"
+# Phase 18 review: the PWA (and its /enroll route) lives at the public app URL
+# (console.conpass.cards); conpass.cards is the marketing site and answered 404.
+ENROLL_BASE = f"{settings.public_app_url}/enroll"
 
 # An appearance edit has to reach passes that are already installed, and each pass is a
 # separate Google API call inside a 15s Lambda. Bounded so a large programme cannot blow
@@ -68,6 +72,14 @@ def _appearance_patch(ap) -> dict:
     return patch
 
 
+def _inactivity_fields(p: dict) -> dict:
+    """`inactivityDays` is deprecated (D21): the abandonment window is a fixed 90 days for
+    every accumulation campaign, whatever a legacy row stores. Omitted for other types."""
+    if p.get("type") not in ACCUMULATION_TYPES:
+        return {}
+    return {"inactivityDays": DEFAULT_INACTIVITY_DAYS}
+
+
 def _forbid_pinned(p: dict) -> None:
     if p.get("demo_pinned"):
         raise Forbidden("this campaign is fixed in the public demo and cannot be edited",
@@ -88,7 +100,7 @@ def _program_model(p: dict, is_demo: bool = False) -> dict:
         "membershipIncludes": p.get("membership_includes"),
         "welcomeBonus": p.get("welcome_bonus", 0),
         "expiryDays": p.get("expiry_days"),
-        **inactivity_fields(p),
+        **_inactivity_fields(p),
         **campaign_fields(p),
         "appearance": {
             "color": p.get("color"),
@@ -162,9 +174,8 @@ def create_program(body: ProgramCreate, identity: CurrentIdentity):
         "membership_includes": body.membershipIncludes,
         "welcome_bonus": body.welcomeBonus or 0,
         "expiry_days": body.expiryDays,
-        # Accumulation campaigns only; NULL means "the 90-day default".
-        "inactivity_days": (body.inactivityDays
-                            if body.type.value in ACCUMULATION_TYPES else None),
+        # `inactivityDays` is deprecated (D21): ignored, the window is a fixed 90 days.
+        "inactivity_days": None,
         "color": appearance.get("color"),
         "icon_storage_key": appearance.get("icon_storage_key"),
         "background_storage_key": appearance.get("background_storage_key"),
@@ -205,8 +216,6 @@ def update_program(program_id: str, body: ProgramUpdate, identity: CurrentIdenti
         patch["points_for_reward"] = body.pointsForReward
     if body.pointsPerDollar is not None:
         patch["points_per_dollar"] = body.pointsPerDollar
-    if body.inactivityDays is not None and p.get("type") in ACCUMULATION_TYPES:
-        patch["inactivity_days"] = body.inactivityDays
     if p.get("type") == SEASONAL:
         if body.occasion is not None:
             patch["occasion"] = body.occasion.strip() or None
@@ -305,7 +314,7 @@ def _push_appearance_to_passes(repo: ProgramsRepository, program: dict) -> None:
 def _program_metrics_model(row: dict | None, program: dict) -> dict:
     """Metrics payload. churnRate (abandonment) / inactivityDays exist for accumulation
     campaigns only: they are left out of the dict, not set to null, so the JSON omits
-    them for a membership pass."""
+    them for a membership pass. inactivityDays is deprecated and always 90 (D21)."""
     accumulation = program.get("type") in ACCUMULATION_TYPES
     if row is None:
         out = {
@@ -315,7 +324,7 @@ def _program_metrics_model(row: dict | None, program: dict) -> dict:
         }
         if accumulation:
             out["churnRate"] = 0.0
-            out["inactivityDays"] = inactivity_days(program)
+            out["inactivityDays"] = DEFAULT_INACTIVITY_DAYS
         return out
     out = {
         "visits": row.get("visits", 0),
@@ -329,10 +338,44 @@ def _program_metrics_model(row: dict | None, program: dict) -> dict:
     if accumulation and row.get("churn_rate") is not None:
         out["churnRate"] = float(row["churn_rate"])
     if accumulation:
-        out["inactivityDays"] = (int(row["inactivity_days"])
-                                 if row.get("inactivity_days") is not None
-                                 else inactivity_days(program))
+        out["inactivityDays"] = DEFAULT_INACTIVITY_DAYS
     return out
+
+
+def _console_metrics(client, program: dict) -> dict:
+    """Phase 18 additions, from the 0018 SQL functions (the same definitions as the
+    reports): the second-visit counts behind secondVisitRate30d, redemptions in the last
+    30 days and, for loyalty campaigns, the exact level distribution.
+
+    Best effort and additive: until migration 0018 is applied the functions do not exist,
+    and the extra (optional) fields are then simply left out.
+    """
+    try:
+        today = today_ec()
+        merchant, pid = str(program["merchant_id"]), str(program["id"])
+
+        def call(name: str, params: dict) -> list[dict]:
+            return client.rpc(name, {"p_merchant": merchant, "p_program": pid,
+                                     "p_locations": None, **params}).execute().data or []
+
+        window = {"p_from": (today - timedelta(days=29)).isoformat(),
+                  "p_to": today.isoformat()}
+        sv = (call("report_second_visit", window) or [{}])[0]
+        act = (call("report_activity", window) or [{}])[0]
+        out = {
+            "secondVisitNew": int(sv.get("new_customers") or 0),
+            "secondVisitReturned": int(sv.get("returned") or 0),
+            "redemptions30d": int(act.get("redemptions") or 0),
+        }
+        if program.get("type") in ACCUMULATION_TYPES:
+            out["levelDistribution"] = [
+                {"level": int(r["level"]), "count": int(r["count"])}
+                for r in call("report_levels", {})]
+        return out
+    except Exception:  # noqa: BLE001 - metrics must still load without the new figures
+        log.warning("console metrics unavailable for program %s", program.get("id"),
+                    exc_info=True)
+        return {}
 
 
 @app.get("/programs/{program_id}/metrics")
@@ -341,9 +384,11 @@ def get_program_metrics(program_id: str, identity: CurrentIdentity):
     if p is None:
         raise NotFound("program not found")
     identity.require_merchant(p["merchant_id"])
-    rows = (service_client().table("program_metrics_view").select("*")
+    client = service_client()
+    rows = (client.table("program_metrics_view").select("*")
             .eq("program_id", program_id).execute().data)
-    return _program_metrics_model(rows[0] if rows else None, p)
+    return {**_program_metrics_model(rows[0] if rows else None, p),
+            **_console_metrics(client, p)}
 
 
 handler = lambda_handler(app)

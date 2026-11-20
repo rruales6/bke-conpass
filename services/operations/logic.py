@@ -26,6 +26,7 @@ class CardState:
     active: bool
     membership_active_until: date | None = None
     rewards_redeemed: int = 0     # total ever redeemed — accrual never touches this
+    level: int = 1                # 1 + redemptions (loyalty cards); never drops (D21)
 
 
 @dataclass(frozen=True)
@@ -72,11 +73,52 @@ def accrue(rules: ProgramRules, state: CardState, *,
     raise RewardMechanicError(f"program mechanic '{rules.mechanic}' does not accrue")
 
 
-def redeem(state: CardState) -> CardState:
+def redeem(state: CardState, *, raise_level: bool = False) -> CardState:
+    """Spend one reward. `raise_level` (loyalty cards) also takes the level up by one."""
     if state.rewards_available < 1:
         raise RewardMechanicError("no reward available to redeem")
     return replace(state, rewards_available=state.rewards_available - 1,
-                   rewards_redeemed=state.rewards_redeemed + 1)
+                   rewards_redeemed=state.rewards_redeemed + 1,
+                   level=state.level + 1 if raise_level else state.level)
+
+
+class UndoError(ValueError):
+    """The stored data cannot be inverted (the card changed in a way the undo can't see)."""
+
+
+def unaccrue(rules: ProgramRules, state: CardState, *, stamps_delta: int,
+             points_delta: int) -> CardState:
+    """Exact inverse of `accrue` for the card's LATEST operation.
+
+    accrue computed  total = held + delta;  earned = total // goal;  held' = total - earned*goal;
+    rewards' = rewards + earned.  Given the post-accrual (held', rewards') and the stored
+    delta, the pre-accrual held is  held' + earned*goal - delta.  `earned` is the smallest
+    count that keeps that non-negative, i.e. the one that puts held back inside [0, goal) —
+    unique for any card whose balance was normalised by earlier accruals. It can never
+    exceed the rewards the card holds now (a redemption since would be a newer operation).
+    """
+    if rules.mechanic == "stamps":
+        held, delta, goal = state.stamps, stamps_delta, rules.stamps_for_reward or 0
+    elif rules.mechanic == "points":
+        held, delta, goal = state.points, points_delta, rules.points_for_reward or 0
+    else:
+        raise UndoError("program mechanic does not accrue")
+    # ceil((delta - held) / goal), never negative
+    earned = max(0, -((held - delta) // goal)) if goal else 0
+    before = held + earned * goal - delta
+    if before < 0 or earned > state.rewards_available:
+        raise UndoError("balance no longer matches the operation")
+    new_rewards = state.rewards_available - earned
+    if rules.mechanic == "stamps":
+        return replace(state, stamps=before, rewards_available=new_rewards)
+    return replace(state, points=before, rewards_available=new_rewards)
+
+
+def unredeem(state: CardState, *, lowered_level: bool) -> CardState:
+    """Inverse of `redeem`. `lowered_level` for loyalty cards (level never drops below 1)."""
+    return replace(state, rewards_available=state.rewards_available + 1,
+                   rewards_redeemed=max(0, state.rewards_redeemed - 1),
+                   level=max(1, state.level - 1) if lowered_level else state.level)
 
 
 def validate_access(state: CardState, *, today: date | None = None) -> tuple[bool, str]:

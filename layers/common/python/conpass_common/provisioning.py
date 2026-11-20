@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import secrets
 import string
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from .db import service_client
@@ -54,6 +55,7 @@ def provision_user(
     name: str | None = None,
     must_change_password: bool = False,
     language: str | None = None,
+    staff_role: str | None = None,
 ) -> ProvisionResult:
     """Create the auth user + profile. Raises Conflict if the email already exists."""
     client = service_client()
@@ -66,6 +68,8 @@ def provision_user(
         app_metadata["station"] = station
     if must_change_password:
         app_metadata["must_change_password"] = True
+    if staff_role:
+        app_metadata["staff_role"] = staff_role   # operation users: cashier | manager
 
     attrs: dict = {
         "email": email,
@@ -89,6 +93,7 @@ def provision_user(
         "role": roles[0],
         "station": station,
         "name": name,
+        **({"staff_role": staff_role} if staff_role else {}),
     }).execute()
 
     log.info("provisioned_user", extra={"user_id": user_id, "roles": roles,
@@ -102,22 +107,28 @@ def update_user(
     email: str | None = None,
     station: str | None = None,
     name: str | None = None,
+    staff_role: str | None = None,
 ) -> None:
-    """Edit an existing auth user + profile (name / email / station).
+    """Edit an existing auth user + profile (name / email / station / staff role).
 
-    Keeps the auth user's `app_metadata.station` in sync so the JWT the backend
-    verifies stays authoritative for cashier routing.
+    Keeps the auth user's `app_metadata.station` and `.staff_role` in sync (one merged write)
+    so the JWT the backend verifies stays authoritative for cashier routing. Manager powers
+    are still re-checked against `profiles.staff_role` (staff.manager_scope), never the token.
     """
     client = service_client()
 
     auth_attrs: dict = {}
     if email is not None:
         auth_attrs["email"] = email
-    if auth_attrs or station is not None:
+    meta_patch: dict = {}
+    if station is not None:
+        meta_patch["station"] = station
+    if staff_role is not None:
+        meta_patch["staff_role"] = staff_role
+    if auth_attrs or meta_patch:
         try:
-            if station is not None:
-                auth_attrs["app_metadata"] = _merged_app_metadata(
-                    client, user_id, {"station": station})
+            if meta_patch:
+                auth_attrs["app_metadata"] = _merged_app_metadata(client, user_id, meta_patch)
             client.auth.admin.update_user_by_id(user_id, auth_attrs)
         except Exception as exc:  # noqa: BLE001 — normalize to a typed error
             raise Conflict(f"could not update login for {user_id}: {exc}") from exc
@@ -127,6 +138,8 @@ def update_user(
         profile_patch["email"] = email
     if station is not None:
         profile_patch["station"] = station
+    if staff_role is not None:
+        profile_patch["staff_role"] = staff_role
     if name is not None:
         profile_patch["name"] = name
     if profile_patch:
@@ -230,6 +243,35 @@ def get_user_language(user_id: str) -> str:
     meta = getattr(getattr(res, "user", None), "user_metadata", None)
     lang = meta.get("language") if isinstance(meta, dict) else None
     return lang if lang in ("es", "en") else "es"
+
+
+def last_sign_ins(user_ids: list[str], *, max_users: int = 100) -> dict[str, str]:
+    """user_id -> last sign-in (ISO timestamp) from the Supabase Auth admin API.
+
+    Best-effort and batched: the lookups run concurrently, one auth call per user (the admin
+    API has no "users by ids" filter), capped at `max_users`. A user that never signed in, or
+    whose lookup fails, is simply absent: the caller omits `lastSignInAt` for them.
+    """
+    ids = list(dict.fromkeys(user_ids))[:max_users]
+    if not ids:
+        return {}
+    try:
+        client = service_client()
+    except Exception:  # noqa: BLE001 - presentation-only data; never fail the request
+        return {}
+
+    def _one(uid: str) -> tuple[str, str | None]:
+        try:
+            res = client.auth.admin.get_user_by_id(uid)
+            ts = getattr(getattr(res, "user", None), "last_sign_in_at", None)
+        except Exception:  # noqa: BLE001
+            return uid, None
+        if ts is None:
+            return uid, None
+        return uid, ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+
+    with ThreadPoolExecutor(max_workers=min(8, len(ids))) as pool:
+        return {uid: ts for uid, ts in pool.map(_one, ids) if ts}
 
 
 def delete_user(user_id: str) -> None:

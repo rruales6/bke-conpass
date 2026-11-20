@@ -118,31 +118,30 @@ def test_after_accrual_non_demo_still_fires():
 
 
 def _daily_db(is_demo):
-    st = {"merchant_id": M1, **MerchantNotificationSettings(balance_expiry_days=30).as_row()}
-    old = NOW - timedelta(days=31, hours=1)
+    st = {"merchant_id": M1, **MerchantNotificationSettings(inactive_days=30).as_row()}
+    idle = NOW - timedelta(days=31, hours=1)
     return FakeDB(
         merchant_notification_settings=[st],
         subscriptions=[{"merchant_id": M1, "tier": "pro"}],
         merchants=[{"id": M1, "is_demo": is_demo, "business_name": "Café"}],
-        programs=[{"id": P1, "reward": "Un café"}],
+        programs=[{"id": P1, "reward": "Un café", "merchant_id": M1}],
         notifiable_cards=[{"card_id": C1, "merchant_id": M1, "program_id": P1,
                            "program_type": "loyalty_stamps", "stamps": 3, "points": 0,
-                           "stamps_for_reward": 8, "points_for_reward": None}],
-        card_last_activity=[{"card_id": C1, "merchant_id": M1, "last_at": old.isoformat()}],
+                           "stamps_for_reward": 8, "points_for_reward": None, "level": 1}],
+        card_last_activity=[{"card_id": C1, "merchant_id": M1, "last_at": idle.isoformat()}],
         cards=[{"id": C1, "merchant_id": M1, "language": "es", "stamps": 3, "points": 0}])
 
 
 def test_daily_skips_demo_merchant_entirely():
     db = _daily_db(True)
-    totals = au.run_daily(db, NOW, push=lambda *a: None)
-    assert totals["merchants"] == 0 and totals["expired"] == 0
-    assert db.rows("cards")[0]["stamps"] == 3          # balance not zeroed
-    assert db.rows("balance_expirations") == []
+    totals = au.run_daily(db, NOW)
+    assert totals["merchants"] == 0 and totals["inactive"] == 0
+    assert db.rows("notification_deliveries") == []
 
 
 def test_daily_still_processes_non_demo_merchant():
-    totals = au.run_daily(_daily_db(False), NOW, push=lambda *a: None)
-    assert totals["expired"] == 1
+    totals = au.run_daily(_daily_db(False), NOW)
+    assert totals["inactive"] == 1
 
 
 # --------------------------------------------------------------------------- #

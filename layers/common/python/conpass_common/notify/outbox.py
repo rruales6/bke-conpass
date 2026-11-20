@@ -3,14 +3,17 @@
 Everything that puts a row into the outbox goes through here so the rules live once:
 one automation `notifications` row per (merchant, type, Ecuador day) that every card's
 delivery hangs off; a fresh balance/near message supersedes the card's stale pending one;
-time-based deliveries are deduplicated by `dedupe_key` (insert-or-ignore).
+time-based deliveries are deduplicated by `dedupe_key` (insert-or-ignore). Every automation
+delivery gets `display_until` = queue time + 48 h (the dispatcher moves it to send time + 48 h
+when the send is later, e.g. after quiet hours).
 """
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 SUPERSEDABLE_TYPES = ("balance", "near")
+AUTOMATION_DISPLAY = timedelta(hours=48)   # automatic notices leave the pass 48 h after sending
 PAGE = 1000          # PostgREST caps a response at 1000 rows by default
 BATCH = 200
 
@@ -83,8 +86,13 @@ def supersede_pending(client, card_id: str) -> int:
     return len(victims)
 
 
+def display_until(now: datetime | None = None) -> str:
+    """ISO timestamp 48 h after `now` (default: the current time)."""
+    return ((now or datetime.now(UTC)) + AUTOMATION_DISPLAY).isoformat()
+
+
 def enqueue_event(client, *, merchant_id: str, card_id: str, type_: str, header: str,
-                  body: str, day: date) -> str:
+                  body: str, day: date, now: datetime | None = None) -> str:
     """Queue ONE event-automation delivery for a card (after an accrual).
 
     Supersedes first so a balance message never supersedes itself. Returns the delivery id.
@@ -93,13 +101,13 @@ def enqueue_event(client, *, merchant_id: str, card_id: str, type_: str, header:
     supersede_pending(client, card_id)
     created = client.table("notification_deliveries").insert({
         "notification_id": notification_id, "merchant_id": merchant_id, "card_id": card_id,
-        "header": header, "body": body}).execute().data
+        "header": header, "body": body, "display_until": display_until(now)}).execute().data
     return created[0]["id"]
 
 
 def enqueue_timed(client, *, merchant_id: str, type_: str, day: date, header: str,
-                  rows: Iterable[dict]) -> int:
-    """Queue time-based deliveries (expiry warning / inactivity) for one merchant.
+                  rows: Iterable[dict], now: datetime | None = None) -> int:
+    """Queue time-based deliveries (inactivity / sequence / birthday) for one merchant.
 
     `rows` are `{card_id, body, dedupe_key}`. Insert-or-ignore on `dedupe_key`, so a daily
     re-run (or an overlapping one) never double-sends. Returns rows actually inserted.
@@ -110,10 +118,11 @@ def enqueue_timed(client, *, merchant_id: str, type_: str, day: date, header: st
     notification_id = get_or_create_automation(client, merchant_id, type_, day, header,
                                                rows[0]["body"])
     inserted = 0
+    until = display_until(now)
     for batch in chunks(rows):
         payload = [{"notification_id": notification_id, "merchant_id": merchant_id,
                     "card_id": r["card_id"], "header": header, "body": r["body"],
-                    "dedupe_key": r["dedupe_key"]} for r in batch]
+                    "dedupe_key": r["dedupe_key"], "display_until": until} for r in batch]
         res = client.table("notification_deliveries").upsert(
             payload, on_conflict="dedupe_key", ignore_duplicates=True).execute().data or []
         inserted += len(res)

@@ -150,8 +150,9 @@ def test_create_persists_inactivity_days_for_accumulation(monkeypatch):
     h = _programs(monkeypatch, repo)
     r = TestClient(h.app).post("/programs", json=_create_body(inactivityDays=45))
     assert r.status_code == 201
-    assert repo.created[0]["inactivity_days"] == 45
-    assert r.json()["inactivityDays"] == 45
+    # Deprecated (D21): ignored on write, always reported as the fixed 90 days.
+    assert repo.created[0]["inactivity_days"] is None
+    assert r.json()["inactivityDays"] == 90
 
 
 def test_create_without_inactivity_days_reports_default_90(monkeypatch):
@@ -192,8 +193,8 @@ def test_patch_updates_inactivity_days(monkeypatch):
     h = _programs(monkeypatch, repo)
     r = TestClient(h.app).patch(f"/programs/{P1}", json={"inactivityDays": 120})
     assert r.status_code == 200
-    assert repo.rows[P1]["inactivity_days"] == 120
-    assert r.json()["inactivityDays"] == 120
+    assert "inactivity_days" not in repo.rows[P1]     # deprecated (D21): ignored
+    assert r.json()["inactivityDays"] == 90
 
 
 def test_patch_without_inactivity_days_leaves_it_unchanged(monkeypatch):
@@ -202,7 +203,7 @@ def test_patch_without_inactivity_days_leaves_it_unchanged(monkeypatch):
     r = TestClient(h.app).patch(f"/programs/{P1}", json={"name": "Nuevo"})
     assert r.status_code == 200
     assert repo.rows[P1]["inactivity_days"] == 30
-    assert r.json()["inactivityDays"] == 30
+    assert r.json()["inactivityDays"] == 90           # always the fixed 90 (D21)
 
 
 def test_patch_on_membership_ignores_inactivity_days(monkeypatch):
@@ -220,8 +221,8 @@ def test_list_and_get_surface_inactivity_days(monkeypatch):
     repo.list = lambda mid: list(repo.rows.values())
     h = _programs(monkeypatch, repo)
     c = TestClient(h.app)
-    assert c.get("/programs").json()[0]["inactivityDays"] == 15
-    assert c.get(f"/programs/{P1}").json()["inactivityDays"] == 15
+    assert c.get("/programs").json()[0]["inactivityDays"] == 90
+    assert c.get(f"/programs/{P1}").json()["inactivityDays"] == 90
 
 
 # --------------------------------------------------------------------------- #
@@ -246,7 +247,7 @@ def test_metrics_maps_churn_and_inactivity_from_view(monkeypatch):
     assert r.json() == {
         "visits": 9, "redemptions": 2, "activeInstalledPasses": 7, "installsThisWeek": 1,
         "eligibleForReminder": 3, "secondVisitRate30d": 50.0,
-        "churnRate": 25.5, "inactivityDays": 30,
+        "churnRate": 25.5, "inactivityDays": 90,
     }
 
 
@@ -265,7 +266,7 @@ def test_metrics_membership_omits_churn_and_inactivity(monkeypatch):
 
 def test_metrics_fallback_row_derives_from_program_type(monkeypatch):
     acc = _metrics(monkeypatch, _row(inactivity_days=45), []).json()
-    assert acc["churnRate"] == 0.0 and acc["inactivityDays"] == 45
+    assert acc["churnRate"] == 0.0 and acc["inactivityDays"] == 90
     assert acc["visits"] == 0
     default = _metrics(monkeypatch, _row(), []).json()
     assert default["inactivityDays"] == 90
@@ -290,7 +291,7 @@ def test_resolve_program_carries_inactivity_days(monkeypatch):
     _owner(h.app, monkeypatch)
     r = TestClient(h.app).post("/operations/resolve", json={"code": "TOK"})
     assert r.status_code == 200, r.text
-    assert r.json()["program"]["inactivityDays"] == 21
+    assert r.json()["program"]["inactivityDays"] == 90   # Phase 18: fixed, stored value ignored
 
 
 # --------------------------------------------------------------------------- #

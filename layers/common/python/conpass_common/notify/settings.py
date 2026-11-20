@@ -1,13 +1,14 @@
 """Notification settings — the ONE place that reads them (Phase 16).
 
-Merchant settings live in `merchant_notification_settings` (missing row = DEFAULTS);
+Merchant settings live in `merchant_notification_settings` (missing row = DEFAULTS, which
+mirror the 0017 column defaults: balance off, "Te extrañamos" on at 30 days, Pro parts off);
 platform rules in the `platform_notification_rules` singleton. Both the notifications
 service and wallet_sync (expiry date, per-card locations) read through here so defaults
 cannot drift.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 
 QUIET_START = "21:00"
@@ -19,25 +20,52 @@ INACTIVE_AUDIENCE_DAYS = 30      # manual "Sin visitar en 30 días"
 MAX_ACTIVE_LOCATIONS = 10        # Google: 10 merchantLocations per class and per object
 
 
+SEQUENCE_MAX_STEPS = 3
+INACTIVE_DAYS_RANGE = (7, 89)         # before the 90-day pause (O2)
+CUSTOM_TEXT_KEYS = ("ready", "near", "inactive", "level_up", "birthday")   # custom_texts jsonb
+DEFAULT_SEQUENCE = ({"day": 30, "text": ""}, {"day": 45, "text": ""}, {"day": 60, "text": ""})
+
+
+def _default_sequence() -> list[dict]:
+    return [dict(step) for step in DEFAULT_SEQUENCE]
+
+
 @dataclass(frozen=True)
 class MerchantNotificationSettings:
-    balance_on: bool = True
+    balance_on: bool = False          # v3.0 decision 2: off by default
     ready_on: bool = True
     near_on: bool = True
     near_stamps: int = 1
     near_points: int = 10
-    milestone_on: bool = True
+    # DEPRECATED (O2 / Phase 18): inert, never written as "on". Kept because the columns and
+    # wallet_sync still read them (balance_expiry_days is always None now).
+    milestone_on: bool = False
     milestone_every: int = 10
-    expiry_on: bool = True
+    expiry_on: bool = False
     expiry_warn_days: int = 7
-    inactive_on: bool = False
-    inactive_days: int = 28
+    inactive_on: bool = True          # "Te extrañamos", every plan since v3.0
+    inactive_days: int = 30
     balance_expiry_days: int | None = None
     card_locations_enrolled: bool = True
     card_locations_top: bool = False
+    # Pro (automated_campaigns) -------------------------------------------------------
+    custom_texts: dict = field(default_factory=dict)       # keys: CUSTOM_TEXT_KEYS
+    sequence_on: bool = False
+    sequence_steps: list = field(default_factory=_default_sequence)   # [{day, text}] <= 3
+    level_up_on: bool = False
+    birthday_on: bool = False
+    birthday_benefit: str = "gift"    # gift | discount
+    birthday_gift: str | None = None
+    birthday_discount_percent: int | None = None
+    birthday_validity_days: int = 7
 
     def as_row(self) -> dict:
         return asdict(self)
+
+    def custom_text(self, key: str) -> str | None:
+        """The merchant's own wording for `key`, or None (blank = the fixed template)."""
+        value = (self.custom_texts or {}).get(key)
+        return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 @dataclass(frozen=True)
@@ -54,8 +82,27 @@ def load_merchant_settings(client, merchant_id: str) -> MerchantNotificationSett
             .eq("merchant_id", merchant_id).limit(1).execute().data or [])
     if not rows:
         return MerchantNotificationSettings()
-    row = rows[0]
-    return MerchantNotificationSettings(**{k: row[k] for k in _MERCHANT_FIELDS if k in row})
+    return settings_from_row(rows[0])
+
+
+def settings_from_row(row: dict) -> MerchantNotificationSettings:
+    """A stored row (possibly with NULLs / missing new columns) as settings."""
+    values = {k: row[k] for k in _MERCHANT_FIELDS if row.get(k) is not None}
+    if not isinstance(values.get("custom_texts", {}), dict):
+        values.pop("custom_texts")
+    if not isinstance(values.get("sequence_steps", []), list):
+        values.pop("sequence_steps")
+    return MerchantNotificationSettings(**values)
+
+
+def is_pro(client, merchant_id: str) -> bool:
+    """True while the merchant's plan includes automated_campaigns. Pro automations check
+    this at RUN time, so a downgraded merchant stops sending them even with the flags on."""
+    from ..plans import AUTOMATED_CAMPAIGNS, get_plan, tier_for_merchant
+    try:
+        return get_plan(tier_for_merchant(client, merchant_id)).has(AUTOMATED_CAMPAIGNS)
+    except Exception:  # noqa: BLE001 - no subscription row: no Pro-only automation
+        return False
 
 
 def save_merchant_settings(client, merchant_id: str,
